@@ -17,7 +17,7 @@ from .creds import resolve_credentials
 from .fetch import fetch_articles_parallel
 from .mboxout import ArticleTooBig, MboxWriter
 from .nntp import DEFAULT_RESPONSE_TIMEOUT, MAX_ARTICLE, NNTPClient, NNTPError, is_missing_article, is_too_big
-from .overview import find_articles_in_date_range
+from .overview import find_articles_in_date_range, overview_is_missing
 from .plugins import RawArticle, apply_plugins, parse_plugin_spec, removes_message_id
 
 # Global so SIGTERM can close an open writer / stop workers.
@@ -294,6 +294,7 @@ def pull_group(
         _record_completed(completed_log, mbox_filename, logger, group)
         return True
 
+    seen: List[int] = []
     rows = find_articles_in_date_range(
         client,
         first,
@@ -301,9 +302,21 @@ def pull_group(
         start_date,
         end_date,
         chunk_size=overview_chunk,
+        seen=seen,
     )
     overview_count = len(rows)
     logger.info("Overview matched %s articles for %s", overview_count, group)
+    if not rows and not sum(seen) and first <= last:
+        # no row at all for a range GROUP reported: either the articles are
+        # gone, or the server's overview database lost them
+        present = overview_is_missing(client, first, last)
+        if present is not None:
+            logger.error(
+                "The overview of %s lists no articles, but the server has article %s: "
+                "its overview is incomplete; not adding %s to %s",
+                group, present, mbox_filename, completed_log,
+            )
+            return False
 
     # Index existing mbox for dedup without opening for append (dry-run must not
     # create or modify the mbox / completed log).

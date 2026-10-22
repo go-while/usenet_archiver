@@ -451,8 +451,10 @@ class NNTPClient:
             except Exception:
                 continue
             parts = line.split(" ", 1)
-            if len(parts) == 2 and parts[0].isdigit():
-                result.append((int(parts[0]), parts[1].strip()))
+            if parts[0].strip().isdigit():
+                # a number alone: the value is empty (some servers trim the
+                # space); the article is there all the same
+                result.append((int(parts[0].strip()), parts[1].strip() if len(parts) == 2 else ""))
         return result
 
     def list_active(self, wildmat: Optional[str] = None) -> List[str]:

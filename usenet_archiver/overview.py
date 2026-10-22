@@ -166,6 +166,7 @@ def find_articles_in_date_range(
     start_date: Optional[datetime],
     end_date: Optional[datetime],
     chunk_size: int = 10000,
+    seen: Optional[List[int]] = None,
 ) -> List[OverviewRow]:
     """Return overview rows for first..last whose Date falls in
     [start_date, end_date] (whole UTC days, inclusive), sorted by number.
@@ -173,6 +174,10 @@ def find_articles_in_date_range(
     Rows without a usable Date are kept. With no dates, every row is
     returned. The whole range is scanned, so neither out-of-order dates nor
     gaps in the article numbers can hide an article in the window.
+
+    seen, a list, gets the number of rows the server listed, in the window
+    or not: none at all for a range that has articles means the overview is
+    broken (see overview_is_missing).
     """
     if first > last:
         return []
@@ -183,7 +188,7 @@ def find_articles_in_date_range(
     start_d = start_date.date() if start_date else None
     end_d = end_date.date() if end_date else None
     logger.info("Overview scan: %s-%s (chunk=%s)", first, last, chunk_size)
-    return list(_scan_chunks(fetch, first, last, chunk_size, start_d, end_d))
+    return list(_scan_chunks(fetch, first, last, chunk_size, start_d, end_d, seen))
 
 
 def _scan_chunks(
@@ -193,6 +198,7 @@ def _scan_chunks(
     chunk_size: int,
     start_d,
     end_d,
+    seen: Optional[List[int]] = None,
 ) -> List[OverviewRow]:
     matched: List[OverviewRow] = []
     cursor = start_id
@@ -200,6 +206,8 @@ def _scan_chunks(
         chunk_end = min(end_id, cursor + chunk_size - 1)
         # A failed chunk raises: skipping it would lose its articles silently.
         rows = fetch(cursor, chunk_end)
+        if seen is not None:
+            seen.append(len(rows))
         for row in rows:
             if start_d is None and end_d is None:
                 matched.append(row)
@@ -221,6 +229,25 @@ def _scan_chunks(
         cursor = chunk_end + 1
     matched.sort(key=lambda r: r.article_id)
     return matched
+
+
+def overview_is_missing(client, first: int, last: int) -> Optional[int]:
+    """After an overview scan of first..last that listed no article: the
+    number of an article the server has all the same (its overview database
+    is then broken, and the job is not complete), else None.
+
+    STAT asks for the first, the middle and the last number, the ones GROUP
+    reported. 423/430 means none there; any other answer counts as "may be
+    there", since an empty overview cannot then be confirmed.
+    """
+    for number in sorted({first, (first + last) // 2, last}):
+        _n, resp = client.stat(number)
+        if resp.startswith("223"):
+            return number
+        if not resp.startswith(("423", "430")):
+            logger.warning("STAT %s: %s; cannot confirm that the group is empty", number, resp)
+            return number
+    return None
 
 
 def filter_rows_by_dedup(rows: Sequence[OverviewRow], seen_ids: set) -> List[OverviewRow]:

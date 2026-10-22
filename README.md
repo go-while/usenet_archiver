@@ -158,7 +158,9 @@ over 1 MiB, or whose body as stored in the mbox (quotes included) reaches 1 MiB,
 written, and counted as `too-big`. mbox2nntp, which imports these mboxes, has the same limits; a
 longer line would stop its parser for the rest of the file. Any other answer (480 authentication
 required, 502 access denied, 503, a timeout, a cut connection) counts as an error, and a failed
-OVER/XOVER fails the job; it is then not recorded, so a later run fetches what is missing.
+OVER/XOVER fails the job; it is then not recorded, so a later run fetches what is missing. So does
+an overview that lists no article at all while `STAT` finds one of the numbers `GROUP` reported
+(a broken overview database).
 
 Each line of `completed_newsgroups.log` is one job, `mbox<TAB>group`, so groups that share an mbox
 (`-g a>x.mbox -g b>x.mbox`) are recorded and skipped each on its own. A line with only an mbox

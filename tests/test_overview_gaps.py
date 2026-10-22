@@ -53,7 +53,6 @@ class TestEmptyOverview(unittest.TestCase):
         log = os.path.join(tmp.name, "completed_newsgroups.log")
         return rc, os.path.exists(log), err.getvalue()
 
-    @unittest.expectedFailure
     def test_articles_exist_job_incomplete(self):
         rc, recorded, err = self._pull(FakeNNTPServer(articles={n: _article(n) for n in range(1, 6)}))
         self.assertEqual((rc, recorded), (1, False), err)
@@ -69,7 +68,6 @@ class TestXhdrLoneNumber(unittest.TestCase):
     """A6: "2" alone (an article with an empty Date, the trailing space
     trimmed) is a row without a date, which a date window keeps."""
 
-    @unittest.expectedFailure
     def test_kept(self):
         a, b = socket.socketpair()
         self.addCleanup(a.close)
