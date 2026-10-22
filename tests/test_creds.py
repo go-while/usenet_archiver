@@ -108,6 +108,33 @@ class TestResolve(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_password_file_line_ends(self):
+        import tempfile
+
+        for content, want in (("secret\n", "secret"), ("secret\r\n", "secret"), ("secret", "secret")):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "p")
+                with open(path, "w", encoding="utf-8", newline="") as fh:
+                    fh.write(content)
+                ep = resolve_credentials(server="news.example.com", port=None, username="u", password=None,
+                                         password_file=path, use_netrc=False)
+                self.assertEqual(ep.password, want, repr(content))
+
+    def test_line_break_in_credentials_refused(self):
+        import tempfile
+
+        for content in ("sec\nret\n", "sec\rret", "secret\n\n"):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "p")
+                with open(path, "w", encoding="utf-8", newline="") as fh:
+                    fh.write(content)
+                with self.assertRaises(ValueError, msg=repr(content)):
+                    resolve_credentials(server="news.example.com", port=None, username="u", password=None,
+                                        password_file=path, use_netrc=False)
+        with self.assertRaises(ValueError):
+            resolve_credentials(server="news.example.com", port=None, username="u\r\nQUIT", password="p",
+                                use_netrc=False)
+
     def test_nntpserver_env(self):
         with mock.patch.dict(os.environ, {"NNTPSERVER": "from.env.example"}):
             self.assertEqual(get_default_nntp_server(), "from.env.example")

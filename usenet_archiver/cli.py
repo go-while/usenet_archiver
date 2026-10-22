@@ -4,15 +4,12 @@
 from __future__ import annotations
 
 import argparse
-import email
 import logging
 import os
 import signal
 import sys
 import threading
 from datetime import datetime, timezone
-from email.generator import BytesGenerator
-from io import BytesIO
 from typing import Callable, List, Optional, Tuple
 
 from .creds import resolve_credentials
@@ -20,7 +17,7 @@ from .fetch import fetch_articles_parallel
 from .mboxout import MboxWriter
 from .nntp import DEFAULT_RESPONSE_TIMEOUT, MAX_ARTICLE, NNTPClient, NNTPError, is_missing_article, is_too_big
 from .overview import find_articles_in_date_range
-from .plugins import apply_plugins, parse_plugin_spec
+from .plugins import RawArticle, apply_plugins, parse_plugin_spec
 
 # Global so SIGTERM can close an open writer / stop workers.
 _ACTIVE_WRITER: Optional[MboxWriter] = None
@@ -133,6 +130,11 @@ def mbox_name_for(group: str, filename: Optional[str], start_date, end_date) -> 
     """
     if filename:
         return filename
+    from .policy import group_name_problem
+
+    problem = group_name_problem(group)
+    if problem:
+        raise ValueError(f"invalid newsgroup name {group!r}: {problem}")
     if start_date is not None and end_date is not None:
         return f"{group}-{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}.mbox"
     return f"{group}.mbox"
@@ -174,12 +176,6 @@ def normalize_message_id(mid: str) -> str:
     if not mid.startswith("<"):
         mid = f"<{mid}>"
     return mid
-
-
-def message_to_bytes(msg) -> bytes:
-    buf = BytesIO()
-    BytesGenerator(buf, mangle_from_=False).flatten(msg)
-    return buf.getvalue()
 
 
 def mark_completed(completed_log: str, mbox_filename: str, logger: logging.Logger) -> None:
@@ -242,6 +238,8 @@ def pull_group(
         except OSError as e:
             logger.warning("Could not read %s: %s", completed_log, e)
 
+    if client.conn is None:  # closed for the fetch of the group before
+        client.connect()
     first, last, group_resp = client.group(group)
     logger.info("GROUP %s: %s (first=%s last=%s)", group, group_resp, first, last)
     if first == 0 and last == 0:
@@ -321,12 +319,11 @@ def pull_group(
                 return
             body = content
             if plugins:
-                msg = email.message_from_bytes(content)
-                msg = apply_plugins(msg, plugins)
+                msg = apply_plugins(RawArticle(content), plugins)
                 if msg is None:
                     articles_skipped += 1
                     return
-                body = message_to_bytes(msg)
+                body = msg.to_bytes()
             if writer.write(body, dt=row.date, message_id=row.message_id or None):
                 articles_saved += 1
             else:
@@ -334,6 +331,10 @@ def pull_group(
 
         stop = _STOP_EVENT if _STOP_EVENT is not None else threading.Event()
         rows_to_fetch = len(rows)
+        # The fetch opens `connections` connections of its own: close this
+        # one meanwhile, so that no more than that are open (providers
+        # limit them). The next group connects again.
+        client.quit()
         _fetched_ok, _missing, _errors, elapsed = fetch_articles_parallel(
             rows=rows,
             group=group,
@@ -425,15 +426,15 @@ def cmd_post(client: NNTPClient, newsgroups: List[str], plugins: list) -> int:
     if not raw.strip():
         sys.stderr.write("No message on stdin\n")
         return 4
-    msg = email.message_from_bytes(raw)
+    msg = RawArticle(raw)
     if "Newsgroups" not in msg and newsgroups:
-        msg["Newsgroups"] = ",".join(newsgroups)
+        msg.add("Newsgroups", ",".join(newsgroups))
     if plugins:
         msg = apply_plugins(msg, plugins)
         if msg is None:
             sys.stderr.write("Message dropped by plugin\n")
             return 4
-    payload = message_to_bytes(msg)
+    payload = msg.to_bytes()
     resp = client.post(payload)
     sys.stderr.write(f"{resp}\n")
     return 0
@@ -800,14 +801,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         completed_log = "completed_newsgroups.log"
         incomplete = 0  # groups that failed or did not get every article
+        from .policy import group_name_problem
+
         for group, filename in group_specs:
-            mbox_filename = mbox_name_for(group, filename, start_date, end_date)
-            log_filename = mbox_filename.rsplit(".", 1)[0] + ".log"
-            file_handler = logging.FileHandler(log_filename)
-            file_handler.setFormatter(
-                logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-            )
-            logging.getLogger().addHandler(file_handler)
+            file_handler = None
+            pulling = False
             conn_kwargs = {
                 "server": endpoint.host,
                 "port": endpoint.port,
@@ -819,6 +817,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "response_timeout": args.response_timeout,
             }
             try:
+                # the name goes into commands and file names: check it first
+                problem = group_name_problem(group)
+                if problem:
+                    raise ValueError(f"invalid newsgroup name {group!r}: {problem}")
+                mbox_filename = mbox_name_for(group, filename, start_date, end_date)
+                log_filename = os.path.splitext(mbox_filename)[0] + ".log"
+                file_handler = logging.FileHandler(log_filename)
+                file_handler.setFormatter(
+                    logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+                )
+                logging.getLogger().addHandler(file_handler)
+                pulling = True
                 done = pull_group(
                     client=client,
                     group=group,
@@ -844,15 +854,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             except Exception as e:
                 logger.error("Failed group %s: %s", group, e)
                 incomplete += 1
-                # The failure may have left the connection out of step: the
-                # next group gets a new one.
-                try:
-                    client.reconnect()
-                except (NNTPError, OSError) as re_err:
-                    logger.error("Reconnect after %s failed: %s", group, re_err)
+                # A failure in the pull may have left the connection out of
+                # step: the next group gets a new one.
+                if pulling:
+                    try:
+                        client.reconnect()
+                    except (NNTPError, OSError) as re_err:
+                        logger.error("Reconnect after %s failed: %s", group, re_err)
             finally:
-                logging.getLogger().removeHandler(file_handler)
-                file_handler.close()
+                if file_handler is not None:
+                    logging.getLogger().removeHandler(file_handler)
+                    file_handler.close()
         if incomplete:
             logger.error("%s of %s group(s) failed or are incomplete", incomplete, len(group_specs))
             return 1

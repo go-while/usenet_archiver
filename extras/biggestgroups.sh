@@ -13,7 +13,7 @@ echo "running big8 report"
 echo
 echo "${NOW}" >"${REPORT_DIR}/${NOW}.mostarticles_big8.txt"
 find /var/spool/news/articles -xdev -type d -exec sh -c '
-    echo "$(find "$0" | grep "^$0/[^/]*$" | wc -l) $0"' {} \; | sort -rn | grep -E "${BIG8_PATTERN}" >>"${REPORT_DIR}/${NOW}.mostarticles_big8.txt"
+    echo "$(find "$0" -mindepth 1 -maxdepth 1 -printf x | wc -c) $0"' {} \; | sort -rn | grep -E "${BIG8_PATTERN}" >>"${REPORT_DIR}/${NOW}.mostarticles_big8.txt"
 cp -v "${REPORT_DIR}/${NOW}.mostarticles_big8.txt" "${REPORT_DIR}/mostarticles_big8.txt"
 mv -v "${REPORT_DIR}/${NOW}.mostarticles_big8.txt" "${REPORT_DIR}/archive/${NOW}.mostarticles_big8.txt"
 
@@ -21,7 +21,7 @@ echo "running top50 report"
 echo
 echo "${NOW}" >"${REPORT_DIR}/${NOW}.top50_mostarticles.txt"
 find /var/spool/news/articles -xdev -type d -exec sh -c '
-  echo "$(find "$0" | grep "^$0/[^/]*$" | wc -l) $0"' {} \; | sort -rn | head -50 >>"${REPORT_DIR}/${NOW}.top50_mostarticles.txt"
+  echo "$(find "$0" -mindepth 1 -maxdepth 1 -printf x | wc -c) $0"' {} \; | sort -rn | head -50 >>"${REPORT_DIR}/${NOW}.top50_mostarticles.txt"
 cp -v "${REPORT_DIR}/${NOW}.top50_mostarticles.txt" "${REPORT_DIR}/top50_mostarticles.txt"
 mv -v "${REPORT_DIR}/${NOW}.top50_mostarticles.txt" "${REPORT_DIR}/archive/${NOW}.top50_mostarticles.txt"
 
@@ -29,7 +29,7 @@ echo "running top1000 report"
 echo
 echo "${NOW}" >"${REPORT_DIR}/${NOW}.top1000_mostarticles.txt"
 find /var/spool/news/articles -xdev -type d -exec sh -c '
-  echo "$(find "$0" | grep "^$0/[^/]*$" | wc -l) $0"' {} \; | sort -rn | head -1000 >>"${REPORT_DIR}/${NOW}.top1000_mostarticles.txt"
+  echo "$(find "$0" -mindepth 1 -maxdepth 1 -printf x | wc -c) $0"' {} \; | sort -rn | head -1000 >>"${REPORT_DIR}/${NOW}.top1000_mostarticles.txt"
 cp -v "${REPORT_DIR}/${NOW}.top1000_mostarticles.txt" "${REPORT_DIR}/top1000_mostarticles.txt"
 mv -v "${REPORT_DIR}/${NOW}.top1000_mostarticles.txt" "${REPORT_DIR}/archive/${NOW}.top1000_mostarticles.txt"
 

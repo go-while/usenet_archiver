@@ -101,11 +101,11 @@ Paths for `.mbox`, `.log`, and `completed_newsgroups.log` are relative to the wo
 
 ### Password file
 
-`--password-file` / the GUI “Password file” field must point to a **plain-text file whose entire contents are the NNTP password**. One line is recommended; a single trailing newline is ignored. Do not put a username or other fields in that file (use `--username` / the Username field separately, or `~/.netrc`).
+`--password-file` / the GUI “Password file” field must point to a **plain-text file whose entire contents are the NNTP password**. One line is recommended; a single trailing line end (LF or CRLF) is ignored, and a password that still contains a line break is refused (exit **2**). Do not put a username or other fields in that file (use `--username` / the Username field separately, or `~/.netrc`).
 
 ### Server blacklist
 
-Bulk archiving is blocked for hosts that are known to ban automation for rate-limit abuse. The list lives in [`usenet_archiver/policy.py`](usenet_archiver/policy.py) as `SERVER_BLACKLIST` (easy to extend). Currently includes **Eternal September** hosts ([tech info](https://www.eternal-september.org/index.php?showpage=techinfo)): `news.eternal-september.org`, `reader80.eternal-september.org`, `reader443.eternal-september.org`, and any subdomain of `eternal-september.org`.
+Bulk archiving is blocked for hosts that are known to ban automation for rate-limit abuse. The list lives in [`usenet_archiver/policy.py`](usenet_archiver/policy.py) as `SERVER_BLACKLIST` (easy to extend). Currently includes **Eternal September** hosts ([tech info](https://www.eternal-september.org/index.php?showpage=techinfo)): `news.eternal-september.org`, `reader80.eternal-september.org`, `reader443.eternal-september.org`, and any subdomain of `eternal-september.org`. The check compares host names only: an IP address or another DNS name for the same server is not caught, so it is a guard against mistakes, not a lock.
 
 ### Credential and server resolution
 

@@ -184,6 +184,9 @@ class NNTPClient:
     def send(self, command: str) -> None:
         if self.conn is None:
             raise NNTPError("Not connected")
+        if "\r" in command or "\n" in command:
+            # a name or a password with a line end would send a second command
+            raise NNTPError("CR or LF inside an NNTP command")
         self.conn.settimeout(self.timeout)
         self.conn.sendall(f"{command}\r\n".encode("ascii", errors="strict"))
 

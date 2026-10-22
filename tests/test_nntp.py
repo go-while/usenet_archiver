@@ -41,6 +41,9 @@ class FakeNNTPServer:
         self.port = self._sock.getsockname()[1]
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._count_lock = threading.Lock()
+        self.open_conns = 0
+        self.max_open_conns = 0  # most connections open at the same time
         self.group_first = 1
         self.group_last = max(self.articles.keys()) if self.articles else 1
 
@@ -94,11 +97,16 @@ class FakeNNTPServer:
             threading.Thread(target=self._handle_and_close, args=(conn,), daemon=True).start()
 
     def _handle_and_close(self, conn):
+        with self._count_lock:
+            self.open_conns += 1
+            self.max_open_conns = max(self.max_open_conns, self.open_conns)
         try:
             self._handle(conn)
         except Exception:
             pass
         finally:
+            with self._count_lock:
+                self.open_conns -= 1
             try:
                 conn.close()
             except OSError:
@@ -577,6 +585,63 @@ class TestLimits(unittest.TestCase):
         (_, content, resp), = c.articles_pipelined([1])
         self.assertTrue(is_too_big(resp))
         self.assertLess(time.monotonic() - t0, 5)
+
+
+class TestWorkers(unittest.TestCase):
+    """Review findings 5.5 (leaked workers) and 5.6 (one connection too many)."""
+
+    def test_error_in_on_article_leaves_no_workers(self):
+        from usenet_archiver.fetch import fetch_articles_parallel
+        from usenet_archiver.overview import OverviewRow
+
+        arts = {n: b"Message-ID: <%d@x>\n\nbody" % n for n in range(1, 1201)}
+        srv = FakeNNTPServer(articles=arts)
+        srv.start()
+        self.addCleanup(srv.stop)
+
+        def disk_full(row, content, resp):
+            raise OSError(28, "No space left on device")
+
+        with self.assertRaises(OSError):
+            fetch_articles_parallel(
+                rows=[OverviewRow(article_id=n) for n in arts],
+                group="misc.test",
+                conn_kwargs=dict(server="127.0.0.1", port=srv.port, use_ssl=False, timeout=2),
+                connections=3,
+                pipeline_depth=8,
+                on_article=disk_full,
+            )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and (
+            srv.open_conns or any(t.name.startswith("nntp-fetch-") and t.is_alive() for t in threading.enumerate())
+        ):
+            time.sleep(0.05)
+        self.assertEqual([t.name for t in threading.enumerate() if t.name.startswith("nntp-fetch-")], [])
+        self.assertEqual(srv.open_conns, 0)
+
+    def test_pull_uses_at_most_C_connections(self):
+        import logging
+        import tempfile
+
+        from usenet_archiver import cli
+
+        arts = {n: b"Message-ID: <%d@x>\n\nbody" % n for n in range(1, 41)}
+        srv = FakeNNTPServer(articles=arts)
+        srv.start()
+        self.addCleanup(srv.stop)
+        kw = dict(server="127.0.0.1", port=srv.port, use_ssl=False, timeout=2)
+        client = NNTPClient(**kw)
+        client.connect()
+        self.addCleanup(client.close)
+        with tempfile.TemporaryDirectory() as tmp:
+            done = cli.pull_group(
+                client=client, group="misc.test", mbox_filename=os.path.join(tmp, "g.mbox"),
+                start_date=None, end_date=None, overview_chunk=100, dedup=True, plugins=[],
+                completed_log=os.path.join(tmp, "done.log"), logger=logging.getLogger("t"),
+                conn_kwargs=kw, connections=2, pipeline_depth=4,
+            )
+        self.assertTrue(done)
+        self.assertLessEqual(srv.max_open_conns, 2)
 
 
 class TestStatusHandling(unittest.TestCase):
