@@ -202,11 +202,10 @@ func readMbox(t T, path string) ([]msg, int) {
 			body[i] = strings.TrimRight(l, "\r")
 		}
 		body = trimEmpty(body)
-		if quoted {
-			for i, l := range body {
-				rest := strings.TrimLeft(l, ">")
-				if strings.HasPrefix(l, ">") && (strings.HasPrefix(rest, "From ") || strings.HasPrefix(rest, "#! rnews ")) {
-					body[i] = l[1:]
+		if quoted { // like mbox2nntp >= v0.3.3 (1749366): header and body lines
+			for _, lines := range [][]string{head, body} {
+				for i, l := range lines {
+					lines[i] = unquote(l)
 				}
 			}
 		}
@@ -246,6 +245,24 @@ func art(id string, body ...string) fakeserver.Article {
 		},
 		Body: body,
 	}
+}
+
+// unquote takes one ">" off a line the archiver quoted: "From " or
+// "#! rnews " after one or more ">" (mbox2nntp's mboxout.Unquote).
+func unquote(l string) string {
+	rest := strings.TrimLeft(l, ">")
+	if strings.HasPrefix(l, ">") && (strings.HasPrefix(rest, "From ") || strings.HasPrefix(rest, "#! rnews ")) {
+		return l[1:]
+	}
+	return l
+}
+
+// withHeaders is a with extra header lines before its Message-ID.
+func withHeaders(a fakeserver.Article, extra ...string) fakeserver.Article {
+	h := append([]string{}, a.Headers[:len(a.Headers)-1]...)
+	h = append(h, extra...)
+	a.Headers = append(h, a.Headers[len(a.Headers)-1])
+	return a
 }
 
 func trimEmpty(b []string) []string {
@@ -317,6 +334,9 @@ var tricky = []struct {
 	{art("<8bit@x>", "caf\xe9 au lait, \xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82"), ""},
 	{art("<long@x>", strings.Repeat("x", 9991)), ""},        // the longest line in the archive.org corpus
 	{art("<long512k@x>", strings.Repeat("y", 512<<10)), ""}, // under go-lib's 1 MiB line limit
+	// header lines that start like a separator: quoted, and unquoted by
+	// mbox2nntp >= v0.3.3 like body lines
+	{withHeaders(art("<fromhdr@x>", "body"), "From : obs@x.example", "From nobody Thu Dec  8 12:55:04 2016"), ""},
 }
 
 // TestTrickyArticle pulls each tricky article between two plain ones.

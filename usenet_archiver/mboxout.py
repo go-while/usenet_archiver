@@ -41,8 +41,9 @@ _MONTHS = (
 
 # The last header line of every article this writer stores. mbox2nntp
 # (github.com/go-while/mbox2nntp) takes it as "this mbox is mboxrd": it takes
-# one ">" off quoted body lines (see needs_quote) and drops the field before
-# sending. Without it mbox2nntp sends body lines as stored.
+# one ">" off quoted lines, header and body (see needs_quote; mbox2nntp >=
+# v0.3.3, older versions send a quoted header line with its ">"), and drops
+# the field before sending. Without it mbox2nntp sends the lines as stored.
 FORMAT_FIELD = b"X-Mbox2nntp-Format: mboxrd"
 
 # Envelope date for an article whose Date is missing, does not parse or is
