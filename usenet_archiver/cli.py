@@ -25,8 +25,13 @@ _STOP_EVENT: Optional[threading.Event] = None
 _TERMINATED = False
 
 
-class TerminatedBySignal(Exception):
-    """Raised when SIGTERM is received during a pull."""
+class TerminatedBySignal(BaseException):
+    """Raised when SIGTERM is received during a pull.
+
+    A BaseException, like KeyboardInterrupt: the "except Exception" blocks on
+    the way (connect, the capabilities probe, a failed group) must not take
+    it for an error and go on.
+    """
 
 
 def _handle_sigterm(signum, frame):
@@ -190,6 +195,13 @@ def mark_completed(completed_log: str, mbox_filename: str, logger: logging.Logge
         logger.error("Failed to update %s: %s", completed_log, e)
 
 
+def _record_completed(completed_log: str, mbox_filename: str, logger: logging.Logger) -> None:
+    """mark_completed, unless a SIGTERM came in: a stopped run records nothing."""
+    if _TERMINATED:
+        raise TerminatedBySignal("terminated")
+    mark_completed(completed_log, mbox_filename, logger)
+
+
 def pull_group(
     client: NNTPClient,
     group: str,
@@ -247,7 +259,7 @@ def pull_group(
             logger.info("DRY-RUN: group %s is empty (would write %s)", group, mbox_filename)
             return True
         logger.info("Group %s is empty", group)
-        mark_completed(completed_log, mbox_filename, logger)
+        _record_completed(completed_log, mbox_filename, logger)
         return True
 
     rows = find_articles_in_date_range(
@@ -289,7 +301,7 @@ def pull_group(
 
     if not rows:
         logger.info("Nothing to fetch for %s", group)
-        mark_completed(completed_log, mbox_filename, logger)
+        _record_completed(completed_log, mbox_filename, logger)
         return True
 
     _ACTIVE_WRITER = writer
@@ -398,7 +410,7 @@ def pull_group(
     writer.close()
     if not clean:
         return False
-    mark_completed(completed_log, mbox_filename, logger)
+    _record_completed(completed_log, mbox_filename, logger)
     return True
 
 
@@ -713,12 +725,21 @@ def _parse_plugins(specs: List[str], parser: argparse.ArgumentParser) -> list:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    global _STOP_EVENT
+    try:
+        return _main(argv)
+    except TerminatedBySignal:  # wherever it came: connecting, resolving, a group
+        sys.stderr.write("Terminated by signal\n")
+        return 4
+
+
+def _main(argv: Optional[List[str]]) -> int:
+    global _STOP_EVENT, _TERMINATED
 
     parser = build_parser()
     args = parser.parse_args(argv)
 
     _STOP_EVENT = threading.Event()
+    _TERMINATED = False
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
     try:
@@ -817,6 +838,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "response_timeout": args.response_timeout,
             }
             try:
+                if _TERMINATED:  # a SIGTERM no handler raised on the way
+                    raise TerminatedBySignal("terminated")
                 # the name goes into commands and file names: check it first
                 problem = group_name_problem(group)
                 if problem:

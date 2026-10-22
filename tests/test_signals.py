@@ -73,9 +73,6 @@ class TestSigtermWhileConnecting(unittest.TestCase):
         self.assertFalse(issubclass(TerminatedBySignal, Exception))
 
 
-for _name in ("test_during_capabilities", "test_during_mode_reader", "test_not_an_exception"):
-    setattr(TestSigtermWhileConnecting, _name,
-            unittest.expectedFailure(getattr(TestSigtermWhileConnecting, _name)))
 
 if __name__ == "__main__":
     unittest.main()

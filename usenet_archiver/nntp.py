@@ -147,6 +147,9 @@ class NNTPClient:
         except Exception as e:
             self.close()
             raise NNTPError(f"Connection error: {e}") from e
+        except BaseException:  # a signal (the CLI's TerminatedBySignal), Ctrl-C
+            self.close()
+            raise
 
     def reconnect(self) -> None:
         """Drop the connection and open a new one, selecting the current group again.
