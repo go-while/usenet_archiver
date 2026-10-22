@@ -1,6 +1,6 @@
 # Packaging targets. Application code: usenet_archiver/. Zipapp: scripts/build_zipapp.sh
 
-.PHONY: zipapp clean-zipapp appimage clean-appimage test gui
+.PHONY: zipapp clean-zipapp appimage clean-appimage test e2e gui
 
 zipapp:
 	./scripts/build_zipapp.sh
@@ -16,6 +16,10 @@ clean-appimage:
 
 test:
 	python3 -m unittest discover -s tests -v
+
+# End-to-end: fake NNTP server (nntp-testkit) -> CLI -> mbox -> go-lib-mbox2nntp. Needs Go.
+e2e:
+	cd e2e && go test -count=1 ./...
 
 gui:
 	python3 -m usenet_archiver

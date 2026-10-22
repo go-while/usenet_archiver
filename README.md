@@ -180,6 +180,23 @@ make test
 python3 -m unittest discover -s tests -v
 ```
 
+End-to-end tests (`e2e/`, Go 1.27+): a fake NNTP server from
+[nntp-testkit](https://github.com/go-while/nntp-testkit) serves a group, the CLI pulls it, and
+[go-lib-mbox2nntp](https://github.com/go-while/go-lib-mbox2nntp), the parser
+[mbox2nntp](https://github.com/go-while/mbox2nntp) imports with, reads the mbox back. Every article
+must come back byte-identical and exactly once, and a pull that did not get every article must not
+be recorded as completed or exit 0.
+
+```bash
+make e2e
+# or
+cd e2e && go test -v ./...
+```
+
+Tests for bugs that are not fixed yet are reported as skipped, with the number of the review
+finding; when such a test starts to pass it fails, so the mark is removed together with the fix.
+CI (`.github/workflows/test.yml`) runs both suites on every push.
+
 ### Responsible use
 
 Use a provider that allows automated bulk reading. Avoid hammering small free servers.

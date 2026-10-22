@@ -1,0 +1,4 @@
+github.com/go-while/go-lib-mbox2nntp v0.0.0-20261022120752-73e35b8ebb89 h1:3xfg8JvhsLnm4OSZJIGsYo004QOgaJl9AcTInJRqOGo=
+github.com/go-while/go-lib-mbox2nntp v0.0.0-20261022120752-73e35b8ebb89/go.mod h1:+JYfNk+CJoNMoXo1DN/KZuF7xmc61FFfyDfTBWNNZF0=
+github.com/go-while/nntp-testkit v0.2.0 h1:j7FjTZMAI2CFZ+tvDrRCOloiowV7E1O+3qACgNtUyDM=
+github.com/go-while/nntp-testkit v0.2.0/go.mod h1:ToP/P8mZXHw5kBz8er8EmSG3ZHyVF4pR5iuauD2MyTM=
