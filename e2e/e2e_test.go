@@ -433,13 +433,14 @@ func TestDateWindowAcrossGap(t *testing.T) {
 		n++
 	}
 	srv := fakeserver.New(t, fakeserver.Options{Store: st})
-	knownBug(t, "1.5", func(t T) {
-		r := pull(t, srv.Addr(), "", "--start", "2016-12-08", "--end", "2016-12-08")
-		got, _ := readMbox(t, r.mbox)
-		if len(got) != n {
-			t.Errorf("%d of %d articles in the window fetched (completed=%v)", len(got), n, r.completed)
-		}
-	})
+	r := pull(t, srv.Addr(), "", "--start", "2016-12-08", "--end", "2016-12-08")
+	got, _ := readMbox(t, r.mbox)
+	if len(got) != n {
+		t.Errorf("%d of %d articles in the window fetched (completed=%v)", len(got), n, r.completed)
+	}
+	if r.exit != 0 || !r.completed {
+		t.Errorf("exit %d completed %v", r.exit, r.completed)
+	}
 }
 
 func seq(a, b int) []int {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for overview date bisect and chunk scanning."""
+"""Tests for overview parsing and the date-window scan."""
 
 from __future__ import annotations
 
@@ -13,9 +13,8 @@ sys.path.insert(0, os.path.abspath(_ROOT))
 
 from usenet_archiver.overview import (  # noqa: E402
     OverviewRow,
-    bisect_lower,
-    bisect_upper,
     filter_rows_by_dedup,
+    find_articles_in_date_range,
     parse_overview_line,
 )
 
@@ -58,37 +57,53 @@ class TestParseOverview(unittest.TestCase):
         self.assertIsNone(parse_overview_line(b"not-a-number\tfoo"))
 
 
-class TestBisect(unittest.TestCase):
-    def setUp(self):
-        # IDs 1..100 with dates spanning 2010-01 through 2018-04 roughly monthly
-        rows = []
-        for i in range(1, 101):
-            year = 2010 + (i - 1) // 12
-            month = ((i - 1) % 12) + 1
-            rows.append(_row(i, year, month, 10))
-        self.store = FakeOverviewStore(rows)
-        self.first, self.last = 1, 100
+class FakeOverClient:
+    """Answers OVER from a dict of number -> date (None = no Date)."""
 
-    def test_bisect_lower(self):
-        target = datetime(2015, 1, 1).date()
-        aid = bisect_lower(self.store.fetch, self.first, self.last, target)
-        # Article for 2015-01 is id 61 ((2015-2010)*12+1)
-        self.assertGreaterEqual(aid, 55)
-        self.assertLessEqual(aid, 65)
+    def __init__(self, dates):
+        self.dates = dates
+        self.calls = []
 
-    def test_bisect_upper(self):
-        target = datetime(2012, 6, 30).date()
-        aid = bisect_upper(self.store.fetch, self.first, self.last, target)
-        self.assertGreaterEqual(aid, 25)
-        self.assertLessEqual(aid, 40)
+    def over(self, a, b):
+        self.calls.append((a, b))
+        lines = []
+        for n in range(a, b + 1):
+            if n in self.dates:
+                d = self.dates[n]
+                ds = d.strftime("%a, %d %b %Y %H:%M:%S +0000") if d else ""
+                lines.append(f"{n}\ts\tf\t{ds}\t<{n}@x>\t\t1\t1".encode())
+        return lines, "OVER", "224" if lines else "423"
 
-    def test_gaps(self):
-        # Remove some mid-range articles
-        for i in range(40, 50):
-            del self.store.by_id[i]
-        target = datetime(2013, 1, 1).date()
-        aid = bisect_lower(self.store.fetch, self.first, self.last, target)
-        self.assertIsInstance(aid, int)
+
+class TestDateWindow(unittest.TestCase):
+    def test_gap_in_numbers_hides_nothing(self):
+        # 1-1000 and 1601-2600, all on the window's day: the bisection used
+        # to land in the gap and return none of them
+        day = datetime(2016, 12, 8, 12, tzinfo=timezone.utc)
+        dates = {n: day for n in list(range(1, 1001)) + list(range(1601, 2601))}
+        rows = find_articles_in_date_range(FakeOverClient(dates), 1, 2600,
+                                           datetime(2016, 12, 8), datetime(2016, 12, 8), chunk_size=500)
+        self.assertEqual(len(rows), 2000)
+
+    def test_window_edges_inclusive_and_undated_kept(self):
+        dates = {
+            1: datetime(2016, 12, 7, 23, 59, tzinfo=timezone.utc),  # before
+            2: datetime(2016, 12, 8, 0, 0, tzinfo=timezone.utc),    # first second of the window
+            3: datetime(2016, 12, 9, 23, 59, tzinfo=timezone.utc),  # last minute of the window
+            4: datetime(2016, 12, 10, 0, 0, tzinfo=timezone.utc),   # after
+            5: None,                                                # no Date: kept
+        }
+        rows = find_articles_in_date_range(FakeOverClient(dates), 1, 5,
+                                           datetime(2016, 12, 8), datetime(2016, 12, 9), chunk_size=2)
+        self.assertEqual([r.article_id for r in rows], [2, 3, 5])
+
+    def test_out_of_order_dates_found(self):
+        dates = {n: datetime(2020, 1, 1, tzinfo=timezone.utc) for n in range(1, 101)}
+        dates[7] = datetime(2016, 12, 8, tzinfo=timezone.utc)   # far from its neighbours
+        dates[93] = datetime(2016, 12, 8, tzinfo=timezone.utc)
+        rows = find_articles_in_date_range(FakeOverClient(dates), 1, 100,
+                                           datetime(2016, 12, 8), datetime(2016, 12, 8), chunk_size=10)
+        self.assertEqual([r.article_id for r in rows], [7, 93])
 
 
 class TestNonMonotonic(unittest.TestCase):

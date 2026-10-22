@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Overview-based date range discovery for NNTP groups.
 
-Uses OVER / XOVER (with XHDR DATE fallback), bisects on Date to bracket a
-window, then bulk-scans overview chunks to produce an exact article ID list.
-Provider-specific heuristics (hardcoded retention years, min IDs) are not used.
+Scans the whole group with OVER / XOVER (XHDR DATE when the server has
+neither) in chunks and keeps the rows whose Date falls in the window. There
+is no bisection on Date: dates are not in article-number order, and gaps in
+the numbers made the bisection skip whole ranges. An overview scan costs
+little next to fetching the articles.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -153,55 +155,6 @@ def fetch_overview_chunk(client, start_id: int, end_id: int) -> List[OverviewRow
     return [parse_xhdr_date_pair(aid, dstr) for aid, dstr in pairs]
 
 
-def sample_date_at(fetch: FetchOverview, article_id: int, first: int, last: int) -> Optional[datetime]:
-    """Return the Date of the nearest available article at or near article_id."""
-    lo = max(first, article_id - 5)
-    hi = min(last, article_id + 5)
-    rows = fetch(lo, hi)
-    # Prefer exact match, else closest with a date
-    exact = [r for r in rows if r.article_id == article_id and r.date is not None]
-    if exact:
-        return exact[0].date
-    dated = [r for r in rows if r.date is not None]
-    if not dated:
-        return None
-    dated.sort(key=lambda r: abs(r.article_id - article_id))
-    return dated[0].date
-
-
-def bisect_lower(fetch: FetchOverview, first: int, last: int, start_date) -> int:
-    """Smallest article_id whose Date is >= start_date (approx; dates not strictly monotonic)."""
-    lo, hi = first, last
-    while lo < hi:
-        mid = (lo + hi) // 2
-        dt = sample_date_at(fetch, mid, first, last)
-        if dt is None:
-            # Skip gaps: move mid right a bit
-            lo = mid + 1
-            continue
-        if _date_only(dt) is None or _date_only(dt) < start_date:
-            lo = mid + 1
-        else:
-            hi = mid
-    return lo
-
-
-def bisect_upper(fetch: FetchOverview, first: int, last: int, end_date) -> int:
-    """Largest article_id whose Date is <= end_date (approx)."""
-    lo, hi = first, last
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        dt = sample_date_at(fetch, mid, first, last)
-        if dt is None:
-            hi = mid - 1
-            continue
-        if _date_only(dt) is None or _date_only(dt) > end_date:
-            hi = mid - 1
-        else:
-            lo = mid
-    return lo
-
-
 def find_articles_in_date_range(
     client,
     first: int,
@@ -209,11 +162,13 @@ def find_articles_in_date_range(
     start_date: Optional[datetime],
     end_date: Optional[datetime],
     chunk_size: int = 10000,
-    margin: int = 500,
 ) -> List[OverviewRow]:
-    """Return overview rows whose Date falls in [start_date, end_date] inclusive.
+    """Return overview rows for first..last whose Date falls in
+    [start_date, end_date] (whole UTC days, inclusive), sorted by number.
 
-    If both dates are None, returns overview for the entire group (chunked).
+    Rows without a usable Date are kept. With no dates, every row is
+    returned. The whole range is scanned, so neither out-of-order dates nor
+    gaps in the article numbers can hide an article in the window.
     """
     if first > last:
         return []
@@ -221,43 +176,10 @@ def find_articles_in_date_range(
     def fetch(a: int, b: int) -> List[OverviewRow]:
         return fetch_with_reconnect(client, a, b)
 
-    if start_date is None and end_date is None:
-        return list(_scan_chunks(fetch, first, last, chunk_size, None, None))
-
     start_d = start_date.date() if start_date else None
     end_d = end_date.date() if end_date else None
-
-    # Bracket with bisect when we have bounds
-    range_first, range_last = first, last
-    if start_d is not None:
-        try:
-            range_first = bisect_lower(fetch, first, last, start_d)
-        except Exception as e:
-            logger.warning("bisect_lower failed: %s; scanning full range", e)
-            range_first = first
-    if end_d is not None:
-        try:
-            range_last = bisect_upper(fetch, first, last, end_d)
-        except Exception as e:
-            logger.warning("bisect_upper failed: %s; scanning full range", e)
-            range_last = last
-
-    # Widen for non-monotonic dates
-    range_first = max(first, range_first - margin)
-    range_last = min(last, range_last + margin)
-    if range_first > range_last:
-        logger.info("Empty bracket after bisect (%s > %s)", range_first, range_last)
-        return []
-
-    logger.info(
-        "Overview scan window: %s-%s (group %s-%s, chunk=%s)",
-        range_first,
-        range_last,
-        first,
-        last,
-        chunk_size,
-    )
-    return list(_scan_chunks(fetch, range_first, range_last, chunk_size, start_d, end_d))
+    logger.info("Overview scan: %s-%s (chunk=%s)", first, last, chunk_size)
+    return list(_scan_chunks(fetch, first, last, chunk_size, start_d, end_d))
 
 
 def _scan_chunks(
