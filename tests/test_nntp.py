@@ -13,7 +13,15 @@ import unittest
 _ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.abspath(_ROOT))
 
-from usenet_archiver.nntp import NNTPClient, NNTPError, is_missing_article  # noqa: E402
+from usenet_archiver.nntp import (  # noqa: E402
+    MAX_ARTICLE,
+    MAX_LINE,
+    NNTPClient,
+    NNTPError,
+    NNTPTimeout,
+    is_missing_article,
+    is_too_big,
+)
 
 
 class FakeNNTPServer:
@@ -492,6 +500,77 @@ class TestOutOfStep(unittest.TestCase):
         client.group("misc.test")
         rows = find_articles_in_date_range(client, 1, 30, None, None, chunk_size=10)
         self.assertEqual([r.article_id for r in rows], list(range(1, 31)))
+
+
+class TestLimits(unittest.TestCase):
+    """A hostile or broken server cannot hang the client or fill its memory."""
+
+    def _feed(self, chunks, pause=0.0, timeout=2, response_timeout=300):
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+
+        def writer():
+            try:
+                for c in chunks:
+                    b.sendall(c)
+                    if pause:
+                        time.sleep(pause)
+            except OSError:
+                pass
+            finally:
+                b.close()
+
+        threading.Thread(target=writer, daemon=True).start()
+        c = NNTPClient("x", 0, timeout=timeout, response_timeout=response_timeout)
+        c.conn = a
+        return c
+
+    def test_drip_hits_the_reply_deadline(self):
+        drip = [b"220 1 <d@x>\r\n"] + [b"x"] * 1000
+        c = self._feed(drip, pause=0.1, timeout=1, response_timeout=1.5)
+        t0 = time.monotonic()
+        with self.assertRaises(NNTPTimeout):
+            c.articles_pipelined([1])
+        self.assertLess(time.monotonic() - t0, 3)
+
+    def _two_articles(self, first_body: bytes):
+        return [b"220 1 <a@x>\r\nMessage-ID: <a@x>\r\n\r\n", first_body, b".\r\n",
+                b"220 2 <b@x>\r\nMessage-ID: <b@x>\r\n\r\nsecond\r\n.\r\n"]
+
+    def test_overlong_line_skips_the_article_and_stays_in_step(self):
+        long_line = b"x" * (2 * MAX_LINE) + b"\r\n"
+        c = self._feed(self._two_articles(b"before\r\n" + long_line + b"after\r\n"))
+        (s1, c1, r1), (s2, c2, r2) = c.articles_pipelined([1, 2])
+        self.assertEqual(c1, b"")
+        self.assertTrue(is_too_big(r1), r1)
+        self.assertEqual(c2, b"Message-ID: <b@x>\n\nsecond")
+
+    def test_big_article_skipped_and_stays_in_step(self):
+        body = b"y" * 999 + b"\r\n"
+        c = self._feed(self._two_articles(body * (MAX_ARTICLE // 1000 + 10)))
+        (s1, c1, r1), (s2, c2, r2) = c.articles_pipelined([1, 2])
+        self.assertTrue(is_too_big(r1), r1)
+        self.assertEqual(c2, b"Message-ID: <b@x>\n\nsecond")
+
+    def test_article_just_under_the_limits_kept(self):
+        line = b"z" * (MAX_LINE - 2)  # with CRLF exactly MAX_LINE
+        c = self._feed([b"220 1 <a@x>\r\n", line + b"\r\n", b".\r\n"])
+        (_, content, resp), = c.articles_pipelined([1])
+        self.assertEqual(content, line)
+
+    def test_over_more_lines_than_asked(self):
+        lines = b"".join(b"%d\ts\tf\td\t<%d@x>\t\t1\t1\r\n" % (n, n) for n in range(1, 50))
+        c = self._feed([b"224 ov\r\n", lines, b".\r\n"])
+        with self.assertRaises(NNTPError):
+            c.over(1, 10)
+
+    def test_huge_line_is_fast(self):
+        # was quadratic: 32 MB took 47 s
+        c = self._feed([b"220 1 <a@x>\r\n"] + [b"x" * 65536] * 512 + [b"\r\n.\r\n"], timeout=10)
+        t0 = time.monotonic()
+        (_, content, resp), = c.articles_pipelined([1])
+        self.assertTrue(is_too_big(resp))
+        self.assertLess(time.monotonic() - t0, 5)
 
 
 class TestStatusHandling(unittest.TestCase):

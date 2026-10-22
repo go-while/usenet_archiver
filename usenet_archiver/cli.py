@@ -18,7 +18,7 @@ from typing import Callable, List, Optional, Tuple
 from .creds import resolve_credentials
 from .fetch import fetch_articles_parallel
 from .mboxout import MboxWriter
-from .nntp import NNTPClient, NNTPError, is_missing_article
+from .nntp import DEFAULT_RESPONSE_TIMEOUT, MAX_ARTICLE, NNTPClient, NNTPError, is_missing_article, is_too_big
 from .overview import find_articles_in_date_range
 from .plugins import apply_plugins, parse_plugin_spec
 
@@ -294,18 +294,23 @@ def pull_group(
     articles_saved = 0
     articles_skipped = 0
     articles_missing = 0
+    articles_too_big = 0
     articles_errors = 0
     try:
         writer.open()
 
         def on_article(row, content, resp):
-            nonlocal articles_saved, articles_skipped, articles_missing, articles_errors
+            nonlocal articles_saved, articles_skipped, articles_missing, articles_too_big, articles_errors
             if _TERMINATED:
                 return
             if not content:
                 if is_missing_article(resp):
                     articles_missing += 1
                     logger.debug("Article %s missing: %s", row.article_id, resp)
+                elif is_too_big(resp):
+                    # mbox2nntp could not import it: skipped and counted, not written
+                    articles_too_big += 1
+                    logger.warning("Article %s %s: skipped", row.article_id, resp)
                 else:  # "error: ..." or a status such as 480/502
                     articles_errors += 1
                     logger.warning("Article %s failed: %s", row.article_id, resp)
@@ -335,16 +340,17 @@ def pull_group(
             stop_event=stop,
         )
         del _fetched_ok, _missing, _errors  # on_article counters are authoritative
-        attempted = articles_saved + articles_skipped + articles_missing + articles_errors
+        attempted = articles_saved + articles_skipped + articles_missing + articles_too_big + articles_errors
         arts_per_s = attempted / max(elapsed, 1e-6)
         kib_per_s = (writer.bytes_written / 1024.0) / max(elapsed, 1e-6)
         logger.info(
-            "Group %s done: saved=%s skipped=%s missing=%s errors=%s "
+            "Group %s done: saved=%s skipped=%s missing=%s too-big=%s errors=%s "
             "(%.1fs, %.1f art/s, %.1f KiB/s, connections=%s pipeline=%s)",
             group,
             articles_saved,
             articles_skipped,
             articles_missing,
+            articles_too_big,
             articles_errors,
             elapsed,
             arts_per_s,
@@ -473,7 +479,16 @@ def _connection_parser() -> argparse.ArgumentParser:
         "--timeout",
         type=int,
         default=60,
-        help="Timeout for operations (seconds)",
+        help="Timeout for one socket read (seconds)",
+    )
+    p.add_argument(
+        "--response-timeout",
+        type=float,
+        default=DEFAULT_RESPONSE_TIMEOUT,
+        metavar="SECONDS",
+        help="Most one reply may take in all, however slowly it arrives "
+        f"(default {DEFAULT_RESPONSE_TIMEOUT}); an article over "
+        f"{MAX_ARTICLE >> 20} MiB is skipped and counted",
     )
     return p
 
@@ -666,6 +681,7 @@ def _connect_client(args, endpoint) -> NNTPClient:
         use_ssl=args.use_ssl,
         verbose=args.verbose,
         timeout=args.timeout,
+        response_timeout=args.response_timeout,
     )
     client.connect()
     return client
@@ -786,6 +802,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "use_ssl": args.use_ssl,
                 "verbose": args.verbose,
                 "timeout": args.timeout,
+                "response_timeout": args.response_timeout,
             }
             try:
                 done = pull_group(

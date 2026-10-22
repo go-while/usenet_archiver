@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Callable, List, Optional, Sequence, Tuple
 
-from .nntp import NNTPClient, NNTPError, NNTPTimeout, is_missing_article
+from .nntp import NNTPClient, NNTPError, NNTPTimeout, is_missing_article, is_too_big
 from .overview import OverviewRow
 
 logger = logging.getLogger(__name__)
@@ -145,6 +145,7 @@ def fetch_articles_parallel(
 
     fetched_ok = 0
     missing = 0
+    too_big = 0
     errors = 0
     done_workers = 0
     processed = 0
@@ -175,6 +176,8 @@ def fetch_articles_parallel(
             bytes_ok += len(content)
         elif is_missing_article(resp):
             missing += 1
+        elif is_too_big(resp):
+            too_big += 1
         else:  # "error: ..." from the worker, or a status such as 480/502
             errors += 1
 
@@ -184,13 +187,14 @@ def fetch_articles_parallel(
             arts_per_s = processed / elapsed
             kib_per_s = (bytes_ok / 1024.0) / elapsed
             logger.info(
-                "progress: %s/%s articles (%.1f art/s, %.1f KiB/s, ok=%s missing=%s err=%s)",
+                "progress: %s/%s articles (%.1f art/s, %.1f KiB/s, ok=%s missing=%s too-big=%s err=%s)",
                 processed,
                 len(rows),
                 arts_per_s,
                 kib_per_s,
                 fetched_ok,
                 missing,
+                too_big,
                 errors,
             )
             last_log = now

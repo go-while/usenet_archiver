@@ -610,52 +610,67 @@ func TestAuth(t *testing.T) {
 }
 
 // TestNeverEndingReply: a reply that never ends, fast (Endless) or one byte
-// at a time (Drip), must not keep the CLI busy: with -t 2 it must give up by
-// itself within 20 s, must not exit 0 or record the pull, and may write only
-// whole articles. The server would go on for 60 s (the testkit deadline).
+// at a time (Drip), must not keep the CLI busy. With --response-timeout 3 it
+// must give up by itself within 20 s, not exit 0 and not record the pull,
+// and may write only whole articles. The server would go on for 60 s (the
+// testkit deadline).
 func TestNeverEndingReply(t *testing.T) {
 	arts := []fakeserver.Article{art("<1@x>", "one"), art("<2@x>", "two"), art("<3@x>", "three")}
-	cases := map[string]struct {
-		f       fakeserver.Faults
-		finding string
-	}{
-		"OVER endless":          {fakeserver.Faults{Endless: map[string]bool{"OVER": true, "XOVER": true}}, "1.4, 3.3"},
-		"ARTICLE endless":       {fakeserver.Faults{Endless: map[string]bool{"ARTICLE": true}}, "3.3"},
-		"ARTICLE drip, endless": {fakeserver.Faults{Endless: map[string]bool{"ARTICLE": true}, Drip: map[string]time.Duration{"ARTICLE": 100 * time.Millisecond}}, "3.2"},
+	cases := map[string]fakeserver.Faults{
+		"OVER endless":          {Endless: map[string]bool{"OVER": true, "XOVER": true}},
+		"ARTICLE endless":       {Endless: map[string]bool{"ARTICLE": true}},
+		"ARTICLE drip, endless": {Endless: map[string]bool{"ARTICLE": true}, Drip: map[string]time.Duration{"ARTICLE": 100 * time.Millisecond}},
 	}
-	for name, c := range cases {
-		c := c
+	for name, f := range cases {
+		f := f
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			srv, _ := newServer(t, arts, c.f)
-			knownBug(t, c.finding, func(t T) {
-				r := pullWithin(t, 20*time.Second, srv.Addr(), "")
-				if r.hung {
-					t.Errorf("still running after 20 s: killed")
-				} else if r.exit == 0 {
-					t.Errorf("exit code 0")
-				}
-				if r.completed {
-					t.Errorf("recorded as completed")
-				}
-				onlyWholeArticles(t, r.mbox, arts)
-			})
+			srv, _ := newServer(t, arts, f)
+			r := pullWithin(t, 20*time.Second, srv.Addr(), "", "--response-timeout", "3")
+			if r.hung {
+				t.Errorf("still running after 20 s: killed")
+			} else if r.exit == 0 {
+				t.Errorf("exit code 0")
+			}
+			if r.completed {
+				t.Errorf("recorded as completed")
+			}
+			onlyWholeArticles(t, r.mbox, arts)
 		})
 	}
 }
 
 // TestOverlongLine: an article with a line over go-lib-mbox2nntp's 1 MiB
-// limit cannot be imported. It must not be written, because the parser stops
-// at that line and every article after it in the mbox would be lost too, and
-// the pull must not be recorded as completed.
+// limit cannot be imported, and the parser would stop at that line, losing
+// every article after it in the mbox. It is skipped and counted, not
+// written; fetching it again cannot help, so the pull completes.
 func TestOverlongLine(t *testing.T) {
 	arts := []fakeserver.Article{art("<1@x>", "one"), art("<2@x>", "two"), art("<3@x>", "three")}
 	srv, _ := newServer(t, arts, fakeserver.Faults{LongLine: map[string]int{"ARTICLE": 2 << 20}})
-	knownBug(t, "3.3", func(t T) {
-		r := pull(t, srv.Addr(), "")
-		readMbox(t, r.mbox) // reports a line over the limit
-		if r.completed || r.exit == 0 {
-			t.Errorf("exit %d completed %v", r.exit, r.completed)
-		}
-	})
+	r := pull(t, srv.Addr(), "")
+	if got, _ := readMbox(t, r.mbox); len(got) != 0 {
+		t.Errorf("%d messages written, want 0", len(got))
+	}
+	if r.exit != 0 || !r.completed {
+		t.Errorf("exit %d completed %v\n%s", r.exit, r.completed, r.output)
+	}
+	if !strings.Contains(r.output, "too-big=3") {
+		t.Errorf("too-big articles not counted:\n%s", r.output)
+	}
+}
+
+// TestArticleOverLimit: an article over 1 MiB (mbox2nntp's article limit)
+// in short lines is skipped and counted; the others are written whole.
+func TestArticleOverLimit(t *testing.T) {
+	var big []string
+	for i := 0; i < 1100; i++ {
+		big = append(big, strings.Repeat("b", 999))
+	}
+	arts := []fakeserver.Article{art("<1@x>", "one"), art("<big@x>", big...), art("<3@x>", "three")}
+	srv, _ := newServer(t, arts, fakeserver.Faults{})
+	r := pull(t, srv.Addr(), "")
+	expectAll(t, r.mbox, []fakeserver.Article{arts[0], arts[2]})
+	if r.exit != 0 || !r.completed || !strings.Contains(r.output, "too-big=1") {
+		t.Errorf("exit %d completed %v\n%s", r.exit, r.completed, r.output)
+	}
 }

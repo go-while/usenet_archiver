@@ -136,7 +136,8 @@ Short and long forms are interchangeable (e.g. `-s` / `--server`, `-u` / `--user
 | `-f`, `--file`, `--groups-file` | One `group[>filename]` per line |
 | `--no-ssl` | Plain NNTP |
 | `-v`, `--verbose` / `--syslog` | Logging |
-| `-t`, `--timeout` | Socket timeout (default **60**) |
+| `-t`, `--timeout` | Timeout for one socket read (default **60**) |
+| `--response-timeout` | Most one reply may take in all, however slowly it arrives (default **300**) |
 | `--start`, `--start-date` / `--end`, `--end-date` | Inclusive date window |
 | `--overview-chunk N` | OVER/XOVER chunk size (default **10000**) |
 | `--no-dedup` | Disable Message-ID dedup |
@@ -152,7 +153,9 @@ See `usenet-archiver -c COMMAND --help` for per-command details.
 ### Exit codes and completed jobs
 
 A job is written to `completed_newsgroups.log` only when every article the overview listed was
-fetched or answered 423/430 (no such article). Any other answer (480 authentication required,
+fetched, answered 423/430 (no such article), or was too big: an article over 1 MiB, or with a
+line over 1 MiB, is read but not written, and counted as `too-big` (mbox2nntp, which imports these
+mboxes, has the same limits; a longer line would stop its parser for the rest of the file). Any other answer (480 authentication required,
 502 access denied, 503, a timeout, a cut connection) counts as an error, and a failed OVER/XOVER
 fails the job; it is then not recorded, so a later run fetches what is missing.
 
