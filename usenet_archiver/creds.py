@@ -95,9 +95,16 @@ def resolve_credentials(
     resolved_pass = password
 
     if resolved_pass is None and password_file:
-        with open(password_file, encoding="utf-8") as fh:
-            # Entire file is the password; a single trailing newline is ignored.
-            resolved_pass = fh.read().rstrip("\n")
+        # Entire file is the password, read as it is (newline="": no
+        # newline translation, so a CR inside it is seen and refused below)
+        with open(password_file, encoding="utf-8", newline="") as fh:
+            raw = fh.read()
+        # one line end, LF or CRLF, ends the file; it is not part of the password
+        if raw.endswith("\r\n"):
+            raw = raw[:-2]
+        elif raw.endswith("\n"):
+            raw = raw[:-1]
+        resolved_pass = raw
 
     if resolved_pass is None:
         env_pass = os.environ.get("NNTP_PASSWORD")
@@ -114,5 +121,11 @@ def resolve_credentials(
     from .policy import check_server_allowed
 
     check_server_allowed(host)
+
+    for what, value in (("user name", resolved_user), ("password", resolved_pass)):
+        if value and ("\r" in value or "\n" in value):
+            # it would end the AUTHINFO command early (a password file
+            # with several lines, or with Windows line ends on every line)
+            raise ValueError(f"The {what} contains a line break")
 
     return ResolvedEndpoint(host=host, port=port, username=resolved_user, password=resolved_pass)

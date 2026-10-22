@@ -43,7 +43,11 @@ END_MT="${YEAR}-${FMONTH}-${LDAY_PAD} 23:59:59"
 echo
 echo "starting archive (${START_MT} .. ${END_MT})"
 mkdir -pv "/tmp/usenet/${FDATE}-${YEAR}"
-find /var/spool/news/articles/ -type d -newermt "${START_MT}" -not -newermt "${END_MT}" -exec rsync -aR {} "/tmp/usenet/${FDATE}-${YEAR}" \;
+# Articles (files) dated in the month, not whole directories: a directory's
+# mtime changes whenever an article is added, so selecting directories copied
+# every article in them, of any month.
+find /var/spool/news/articles/ -type f -newermt "${START_MT}" -not -newermt "${END_MT}" -print0 |
+	rsync -a --from0 --files-from=- / "/tmp/usenet/${FDATE}-${YEAR}"
 
 ### Move Dir
 echo

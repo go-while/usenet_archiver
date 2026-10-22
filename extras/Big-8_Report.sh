@@ -10,4 +10,4 @@ echo "running big8 report"
 echo
 echo "${NOW}" >"${HOME}/${NOW}.mostarticles_big8.txt"
 find /var/spool/news/articles -xdev -type d -exec sh -c '
-    echo "$(find "$0" | grep "^$0/[^/]*$" | wc -l) $0"' {} \; | sort -rn | grep -E "${BIG8_PATTERN}" >>"${HOME}/${NOW}.mostarticles_big8.txt"
+    echo "$(find "$0" -mindepth 1 -maxdepth 1 -printf x | wc -c) $0"' {} \; | sort -rn | grep -E "${BIG8_PATTERN}" >>"${HOME}/${NOW}.mostarticles_big8.txt"
