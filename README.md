@@ -90,7 +90,7 @@ usenet-archiver -c post -g misc.test < msg.eml
 - Opens NNTP (TLS default port **563**, or **`--no-ssl`** port **119**).
 - Discovers article ranges with **OVER / XOVER** (fallback **XHDR DATE**).
 - Fetches with **`--connections`** parallel sockets and **`--pipeline-depth`** pipelined `ARTICLE` commands.
-- Date window via **`--start-date`** / **`--end-date`** (`YYYY-MM-DD`). Omit end → through **today UTC**; omit start → from **1990-01-01**. Open-ended "since DATE" jobs include today's date in the mbox name, so the same request tomorrow is a **new pull**.
+- Date window via **`--start-date`** / **`--end-date`** (`YYYY-MM-DD`). Omit end → through **today UTC**; omit start → no lower bound (everything up to the end date, `group-until-YYYYMMDD.mbox`; an existing `group-19900101-YYYYMMDD.mbox` from version 2.0.1 is used on). Open-ended "since DATE" jobs include today's date in the mbox name, so the same request tomorrow is a **new pull**.
 - Writes **mbox** in **append** mode with **Message-ID dedup**; records a job in **`completed_newsgroups.log` only after a successful, complete pull** (cancelled / errored runs are not recorded). Re-running is safe and **incremental** via Message-ID dedup. Use **`--skip-completed`** to hard-skip jobs already listed.
 - Article payloads stay **bytes** end to end; missing articles (`430`/`423`) are skipped.
 - Newsgroup names containing **binary** (and common misspellings / translations) are **skipped** automatically.

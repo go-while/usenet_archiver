@@ -100,7 +100,9 @@ def filter_binary_groups(
 
 
 def normalize_date_range(start_date, end_date, verbose: bool = False, today=None):
-    """Fill missing bounds: lone start → end=today UTC; lone end → start=1990-01-01.
+    """Fill a missing end: lone start → end=today UTC. A lone end stays
+    alone: everything up to it, however old (Usenet began in 1979, and
+    broken dates go further back).
 
     An open-ended ``start`` with no ``end`` resolves ``end`` to *today* (UTC).
     Running the same "since DATE" job on a later calendar day therefore yields a
@@ -118,10 +120,8 @@ def normalize_date_range(start_date, end_date, verbose: bool = False, today=None
         end_date = datetime.combine(today, datetime.min.time())
         if verbose:
             print(f"Note: --end-date omitted; using end date {end_date.date()} (UTC).")
-    elif end_date is not None and start_date is None:
-        start_date = datetime(1990, 1, 1)
-        if verbose:
-            print(f"Note: --start-date omitted; using start date {start_date.date()}.")
+    elif end_date is not None and start_date is None and verbose:
+        print("Note: --start-date omitted; no lower bound.")
     if start_date is not None and end_date is not None and start_date > end_date:
         raise ValueError("start date must be on or before end date")
     return start_date, end_date
@@ -132,7 +132,8 @@ def mbox_name_for(group: str, filename: Optional[str], start_date, end_date) -> 
 
     Example: start=2025-07-01 with no end on July 10 →
     ``group-20250701-20250710.mbox``; the same request on July 11 →
-    ``group-20250701-20250711.mbox`` (a separate pull).
+    ``group-20250701-20250711.mbox`` (a separate pull). An end alone →
+    ``group-until-20250710.mbox``.
     """
     if filename:
         return filename
@@ -143,6 +144,13 @@ def mbox_name_for(group: str, filename: Optional[str], start_date, end_date) -> 
         raise ValueError(f"invalid newsgroup name {group!r}: {problem}")
     if start_date is not None and end_date is not None:
         return f"{group}-{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}.mbox"
+    if end_date is not None:
+        name = f"{group}-until-{end_date.strftime('%Y%m%d')}.mbox"
+        # version 2.0.1 started a lone end at 1990-01-01: keep using its mbox
+        old = f"{group}-19900101-{end_date.strftime('%Y%m%d')}.mbox"
+        if not os.path.exists(name) and os.path.exists(old):
+            return old
+        return name
     return f"{group}.mbox"
 
 
@@ -634,7 +642,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--end",
         "--end-date",
         dest="end_date",
-        help="End date (YYYY-MM-DD). May be used alone; start defaults to 1990-01-01.",
+        help="End date (YYYY-MM-DD). May be used alone: everything up to that day.",
     )
     pull.add_argument(
         "--overview-chunk",

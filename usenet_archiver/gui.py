@@ -532,6 +532,8 @@ class UsenetArchiverGUI:
             self.job_preview_var.set(
                 f"Output: {name}{extra}  ({start.date()} .. {end.date()}{note})"
             )
+        elif end:
+            self.job_preview_var.set(f"Output: {name}{extra}  (everything up to {end.date()})")
         else:
             self.job_preview_var.set(f"Output: {name}{extra}  (full group range)")
 

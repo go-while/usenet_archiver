@@ -41,7 +41,6 @@ class TestNormalizeDateRange(unittest.TestCase):
         self.assertEqual(name_11, "alt.fan.usenet-20250701-20250711.mbox")
         self.assertNotEqual(name_10, name_11)
 
-    @unittest.expectedFailure
     def test_end_only_has_no_lower_bound(self):
         # review 2, A7: a lone end used to start the window at 1990-01-01,
         # which left out older articles and refused an end before 1990
@@ -55,7 +54,6 @@ class TestNormalizeDateRange(unittest.TestCase):
 
 
 class TestMboxName(unittest.TestCase):
-    @unittest.expectedFailure
     def test_end_only_name(self):
         import tempfile
 
@@ -134,11 +132,9 @@ class TestEndOnlyPull(unittest.TestCase):
                     data += fh.read()
         return rc, sorted(int(x) for x in __import__("re").findall(rb"\nbody (\d)\n", data))
 
-    @unittest.expectedFailure
     def test_before_1990_kept(self):
         self.assertEqual(self._pull("--end", "2000-01-01"), (0, [1, 2]))
 
-    @unittest.expectedFailure
     def test_end_before_1990(self):
         self.assertEqual(self._pull("--end", "1985-12-31"), (0, [2]))
 
