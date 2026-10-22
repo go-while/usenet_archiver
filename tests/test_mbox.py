@@ -13,25 +13,60 @@ _ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.abspath(_ROOT))
 
 from usenet_archiver.mboxout import (  # noqa: E402
+    FORMAT_FIELD,
     MboxWriter,
-    escape_mboxrd,
     format_envelope_utc,
+    format_mbox_message,
     index_message_ids,
+    needs_quote,
+    split_article,
+    unquote,
     write_mbox_message,
 )
 
 
 class TestEscape(unittest.TestCase):
-    def test_escape_from_line(self):
-        data = b"Header: x\n\nFrom someone\nbody\n"
-        out = escape_mboxrd(data)
-        self.assertIn(b">From someone\n", out)
-        self.assertNotIn(b"\nFrom someone\n", out)
+    """mboxrd as mbox2nntp's internal/mboxout writes and reads it."""
 
-    def test_already_escaped(self):
-        data = b">From already\n"
-        out = escape_mboxrd(data)
-        self.assertEqual(out.count(b">From"), 1)
+    # the body of mbox2nntp's TestImportExportedMbox
+    BODY = [b"From the start", b">From a quote", b">>From deeper", b"#! rnews 12",
+            b">#! rnews 5", b"> plain quote", b"end"]
+
+    def test_needs_quote(self):
+        for line in (b"From x", b">From x", b">>>From x", b"#! rnews 1", b">#! rnews 1"):
+            self.assertTrue(needs_quote(line), line)
+        for line in (b"From:", b"from x", b" From x", b"> From x", b"#!rnews 1", b"x From y", b""):
+            self.assertFalse(needs_quote(line), line)
+
+    def test_body_quoted_one_level(self):
+        article = b"Subject: s\nMessage-ID: <rd@test>\n\n" + b"\n".join(self.BODY)
+        out = format_mbox_message(article)
+        body = out.split(FORMAT_FIELD + b"\n\n", 1)[1].split(b"\n")
+        self.assertEqual(body[:7], [b">From the start", b">>From a quote", b">>>From deeper",
+                                    b">#! rnews 12", b">>#! rnews 5", b"> plain quote", b"end"])
+        self.assertEqual([unquote(l) for l in body[:7]], self.BODY)
+
+    def test_format_field_is_last_header_line(self):
+        out = format_mbox_message(b"Subject: s\nMessage-ID: <a@b>\n\nbody")
+        lines = out.split(b"\n")
+        self.assertEqual(lines[1:5], [b"Subject: s", b"Message-ID: <a@b>", FORMAT_FIELD, b""])
+
+    def test_cr_kept(self):
+        out = format_mbox_message(b"Subject: s\n\ncol1\rcol2\nend")
+        self.assertIn(b"\ncol1\rcol2\nend\n", out)
+
+    def test_one_empty_line_after_message(self):
+        for article in (b"Subject: s\n\nbody", b"Subject: s\n\nbody\n"):
+            self.assertTrue(format_mbox_message(article).endswith(b"\nbody\n\n"), article)
+
+    def test_headers_only(self):
+        out = format_mbox_message(b"Subject: s\nMessage-ID: <h@x>")
+        self.assertTrue(out.endswith(b"Message-ID: <h@x>\n" + FORMAT_FIELD + b"\n\n\n"))
+
+    def test_split_article_crlf(self):
+        head, body = split_article(b"Subject: s\r\nX: y\r\n\r\nbody\r\n")
+        self.assertEqual(head, [b"Subject: s\r", b"X: y\r"])
+        self.assertEqual(body, [b"body\r"])
 
 
 class TestEnvelope(unittest.TestCase):
@@ -44,6 +79,16 @@ class TestEnvelope(unittest.TestCase):
         self.assertIn(b"2020", line)
         # Must be ASCII
         line.decode("ascii")
+
+    def test_year_padded(self):
+        line = format_envelope_utc(datetime(100, 1, 1, 10, tzinfo=timezone.utc), "a@b")
+        self.assertEqual(line, b"From a@b Fri Jan  1 10:00:00 0100\n")
+
+    def test_missing_or_overflowing_date_gives_epoch(self):
+        from datetime import timedelta
+        late = datetime(9999, 12, 31, 23, tzinfo=timezone(timedelta(hours=-2)))
+        for dt in (None, late):
+            self.assertEqual(format_envelope_utc(dt, "a@b"), b"From a@b Thu Jan  1 00:00:00 1970\n")
 
 
 class TestDedup(unittest.TestCase):

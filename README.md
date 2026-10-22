@@ -172,6 +172,20 @@ usenet-archiver -c pull \
 | `keep_headers` | Keep listed headers; clear body |
 | `debug` | Print call args |
 
+### mbox format
+
+Each article is stored as mboxrd, the way [mbox2nntp](https://github.com/go-while/mbox2nntp)
+imports it (its `internal/mboxout` is the reference):
+
+- an RFC 4155 envelope line, `From <sender> Thu Dec  8 12:55:04 2016`, in UTC from the
+  article's Date (`Thu Jan  1 00:00:00 1970` when Date is missing or out of range);
+- the article's header lines, then `X-Mbox2nntp-Format: mboxrd` as the last one;
+- an empty line and the body. A line that starts with `From ` or `#! rnews ` after any number
+  of `>` gets one more `>`; mbox2nntp takes one off again and drops the field before sending;
+- one empty line before the next envelope.
+
+Nothing else changes: bytes are kept as they are, including 8-bit text and a CR inside a line.
+
 ### Tests
 
 ```bash

@@ -307,10 +307,11 @@ var tricky = []struct {
 	finding string
 }{
 	{art("<plain@x>", "just text"), ""},
-	{art("<from@x>", "From here on, a body line starting with From"), "1.6"},
+	{art("<from@x>", "From here on, a body line starting with From"), ""},
 	{art("<gtfrom@x>", ">From a quoted line", ">>From deeper"), ""},
-	{art("<rnews@x>", "quoting an rnews batch:", "#! rnews 1234", "Path: inner", "Message-ID: <inner@x>", "", "inner body"), "1.6"},
-	{art("<cr@x>", "col1\rcol2 on one line"), "1.12"},
+	{art("<rnews@x>", "quoting an rnews batch:", "#! rnews 1234", "Path: inner", "Message-ID: <inner@x>", "", "inner body"), ""},
+	{art("<gtrnews@x>", ">#! rnews 5", ">>#! rnews 6", "> plain quote"), ""},
+	{art("<cr@x>", "col1\rcol2 on one line"), ""},
 	{art("<dots@x>", ".", "..", ".leading dot", "...three"), ""},
 	{art("<8bit@x>", "caf\xe9 au lait, \xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82"), ""},
 	{art("<long@x>", strings.Repeat("x", 9991)), ""},        // the longest line in the archive.org corpus

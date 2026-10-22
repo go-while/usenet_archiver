@@ -344,8 +344,9 @@ class NNTPClient:
             raise NNTPError(f"POST rejected: {resp}")
         if self.conn is None:
             raise NNTPError("Not connected")
-        # Dot-stuff lines beginning with '.'
-        lines = message.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+        # Dot-stuff lines beginning with '.'. Only CRLF is a line end: a lone
+        # CR stays inside its line.
+        lines = message.replace(b"\r\n", b"\n").split(b"\n")
         stuffed: List[bytes] = []
         for line in lines:
             if line.startswith(b"."):
