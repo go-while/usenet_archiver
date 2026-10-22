@@ -508,6 +508,9 @@ class TestLimits(unittest.TestCase):
     def _feed(self, chunks, pause=0.0, timeout=2, response_timeout=300):
         a, b = socket.socketpair()
         self.addCleanup(a.close)
+        # the server end stays open until the test ends: closing it after the
+        # last chunk raced with the client's command (BrokenPipeError)
+        self.addCleanup(b.close)
 
         def writer():
             try:
@@ -517,8 +520,6 @@ class TestLimits(unittest.TestCase):
                         time.sleep(pause)
             except OSError:
                 pass
-            finally:
-                b.close()
 
         threading.Thread(target=writer, daemon=True).start()
         c = NNTPClient("x", 0, timeout=timeout, response_timeout=response_timeout)
