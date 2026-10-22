@@ -14,6 +14,8 @@
 package e2e
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -99,17 +101,27 @@ type pullResult struct {
 	exit      int
 	output    string
 	completed bool
+	hung      bool // killed at the time limit
 }
 
-// pull runs the CLI against addr in dir (a fresh temp dir when "").
+// pull runs the CLI against addr in dir (a fresh temp dir when ""), with
+// "-t 2", and kills it after 90 s.
 func pull(t T, addr, dir string, extra ...string) pullResult {
+	t.Helper()
+	return pullWithin(t, 90*time.Second, addr, dir, extra...)
+}
+
+// pullWithin is pull with a time limit; a CLI killed at the limit is hung.
+func pullWithin(t T, limit time.Duration, addr, dir string, extra ...string) pullResult {
 	t.Helper()
 	if dir == "" {
 		dir = t.TempDir()
 	}
 	args := append([]string{"-m", "usenet_archiver", "-c", "pull", "-s", addr, "--no-ssl", "--no-netrc",
 		"-g", group, "-C", "2", "-D", "4", "-t", "2"}, extra...)
-	cmd := exec.Command("python3", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "python3", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PYTHONPATH="+uaSrc(t), "NNTPSERVER=", "NNTP_PASSWORD=")
 	out, err := cmd.CombinedOutput()
@@ -120,7 +132,7 @@ func pull(t T, addr, dir string, extra ...string) pullResult {
 		t.Fatalf("running the CLI: %v", err)
 	}
 	// "group.mbox", or "group-YYYYMMDD-YYYYMMDD.mbox" for a date window
-	r := pullResult{dir: dir, mbox: filepath.Join(dir, group+".mbox"), exit: exit, output: string(out)}
+	r := pullResult{dir: dir, mbox: filepath.Join(dir, group+".mbox"), exit: exit, output: string(out), hung: ctx.Err() != nil}
 	if m, _ := filepath.Glob(filepath.Join(dir, group+"-*.mbox")); len(m) == 1 {
 		r.mbox = m[0]
 	}
@@ -158,6 +170,7 @@ func readMbox(t T, path string) ([]msg, int) {
 		t.Fatalf("go-lib-mbox2nntp rejects the mbox: %v", err)
 	}
 	var out []msg
+	var prev error
 	for {
 		mm, err := m.ReadMessage()
 		if err == io.EOF {
@@ -165,8 +178,14 @@ func readMbox(t T, path string) ([]msg, int) {
 		}
 		if err != nil {
 			t.Errorf("go-lib-mbox2nntp: %v", err)
+			// the parser reads no further after a line over its limit
+			if errors.Is(err, mbox.ErrLineTooLong) || (prev != nil && err.Error() == prev.Error()) {
+				break
+			}
+			prev = err
 			continue
 		}
+		prev = nil
 		b, _ := io.ReadAll(mm.BodyReader())
 		quoted := false
 		var head []string
@@ -294,7 +313,8 @@ var tricky = []struct {
 	{art("<cr@x>", "col1\rcol2 on one line"), "1.12"},
 	{art("<dots@x>", ".", "..", ".leading dot", "...three"), ""},
 	{art("<8bit@x>", "caf\xe9 au lait, \xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82"), ""},
-	{art("<long@x>", strings.Repeat("x", 9991)), ""},
+	{art("<long@x>", strings.Repeat("x", 9991)), ""},        // the longest line in the archive.org corpus
+	{art("<long512k@x>", strings.Repeat("y", 512<<10)), ""}, // under go-lib's 1 MiB line limit
 }
 
 // TestTrickyArticle pulls each tricky article between two plain ones.
@@ -361,7 +381,7 @@ func TestRerunAddsNothing(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			// served raw: the Store would add a Message-ID to "no id"
-			srv := fakeserver.New(t, fakeserver.Options{Handler: rawHandler([]fakeserver.Article{c.a}, nil)})
+			srv := fakeserver.New(t, fakeserver.Options{Handler: rawHandler([]fakeserver.Article{c.a})})
 			check := func(t T) {
 				dir := t.TempDir()
 				for run := 0; run < 3; run++ {
@@ -502,11 +522,9 @@ func TestFaultNoPartialArticle(t *testing.T) {
 }
 
 // rawHandler returns a small reader server for one group that serves arts
-// as numbers 1..len(arts) with their headers exactly as given (the Store adds
-// a Message-ID when one is missing), and answers ARTICLE n with gone[n] when
-// set: an article that OVER lists but that expired before ARTICLE, which the
-// Store cannot do either.
-func rawHandler(arts []fakeserver.Article, gone map[int]string) func(*fakeserver.Conn) {
+// as numbers 1..len(arts) with their headers exactly as given: the Store adds
+// a Message-ID to an article that has none.
+func rawHandler(arts []fakeserver.Article) func(*fakeserver.Conn) {
 	return func(c *fakeserver.Conn) {
 		for {
 			line, err := c.ReadLine()
@@ -533,10 +551,6 @@ func rawHandler(arts []fakeserver.Article, gone map[int]string) func(*fakeserver
 			case "ARTICLE":
 				var n int
 				fmt.Sscan(f[len(f)-1], &n)
-				if st, ok := gone[n]; ok {
-					c.WriteLines(st)
-					continue
-				}
 				if n < 1 || n > len(arts) {
 					c.WriteLines("423 no article with that number")
 					continue
@@ -567,8 +581,11 @@ func rawHandler(arts []fakeserver.Article, gone map[int]string) func(*fakeserver
 // completes.
 func TestMissingArticlesAreNotFailures(t *testing.T) {
 	arts := []fakeserver.Article{art("<1@m>", "one"), art("<2@m>", "two"), art("<3@m>", "three"), art("<4@m>", "four"), art("<5@m>", "five")}
-	gone := map[int]string{2: "430 no such article", 4: "423 no article with that number"}
-	srv := fakeserver.New(t, fakeserver.Options{Handler: rawHandler(arts, gone)})
+	// OVER lists all five; 2 and 4 expired before ARTICLE
+	srv, _ := newServer(t, arts, fakeserver.Faults{OverrideLine: map[string][]string{
+		"ARTICLE 2": {"430 no such article"},
+		"ARTICLE 4": {"423 no article with that number"},
+	}})
 	r := pull(t, srv.Addr(), "", "-C", "1", "-D", "5")
 	expectAll(t, r.mbox, []fakeserver.Article{arts[0], arts[2], arts[4]})
 	if r.exit != 0 || !r.completed {
@@ -589,4 +606,55 @@ func TestAuth(t *testing.T) {
 	if bad.exit == 0 || bad.completed {
 		t.Errorf("wrong password: exit %d completed %v", bad.exit, bad.completed)
 	}
+}
+
+// TestNeverEndingReply: a reply that never ends, fast (Endless) or one byte
+// at a time (Drip), must not keep the CLI busy: with -t 2 it must give up by
+// itself within 20 s, must not exit 0 or record the pull, and may write only
+// whole articles. The server would go on for 60 s (the testkit deadline).
+func TestNeverEndingReply(t *testing.T) {
+	arts := []fakeserver.Article{art("<1@x>", "one"), art("<2@x>", "two"), art("<3@x>", "three")}
+	cases := map[string]struct {
+		f       fakeserver.Faults
+		finding string
+	}{
+		"OVER endless":          {fakeserver.Faults{Endless: map[string]bool{"OVER": true, "XOVER": true}}, "1.4, 3.3"},
+		"ARTICLE endless":       {fakeserver.Faults{Endless: map[string]bool{"ARTICLE": true}}, "3.3"},
+		"ARTICLE drip, endless": {fakeserver.Faults{Endless: map[string]bool{"ARTICLE": true}, Drip: map[string]time.Duration{"ARTICLE": 100 * time.Millisecond}}, "3.2"},
+	}
+	for name, c := range cases {
+		c := c
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv, _ := newServer(t, arts, c.f)
+			knownBug(t, c.finding, func(t T) {
+				r := pullWithin(t, 20*time.Second, srv.Addr(), "")
+				if r.hung {
+					t.Errorf("still running after 20 s: killed")
+				} else if r.exit == 0 {
+					t.Errorf("exit code 0")
+				}
+				if r.completed {
+					t.Errorf("recorded as completed")
+				}
+				onlyWholeArticles(t, r.mbox, arts)
+			})
+		})
+	}
+}
+
+// TestOverlongLine: an article with a line over go-lib-mbox2nntp's 1 MiB
+// limit cannot be imported. It must not be written, because the parser stops
+// at that line and every article after it in the mbox would be lost too, and
+// the pull must not be recorded as completed.
+func TestOverlongLine(t *testing.T) {
+	arts := []fakeserver.Article{art("<1@x>", "one"), art("<2@x>", "two"), art("<3@x>", "three")}
+	srv, _ := newServer(t, arts, fakeserver.Faults{LongLine: map[string]int{"ARTICLE": 2 << 20}})
+	knownBug(t, "3.3", func(t T) {
+		r := pull(t, srv.Addr(), "")
+		readMbox(t, r.mbox) // reports a line over the limit
+		if r.completed || r.exit == 0 {
+			t.Errorf("exit %d completed %v", r.exit, r.completed)
+		}
+	})
 }
