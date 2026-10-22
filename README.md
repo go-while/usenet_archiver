@@ -153,11 +153,12 @@ See `usenet-archiver -c COMMAND --help` for per-command details.
 ### Exit codes and completed jobs
 
 A job is written to `completed_newsgroups.log` only when every article the overview listed was
-fetched, answered 423/430 (no such article), or was too big: an article over 1 MiB, or with a
-line over 1 MiB, is read but not written, and counted as `too-big` (mbox2nntp, which imports these
-mboxes, has the same limits; a longer line would stop its parser for the rest of the file). Any other answer (480 authentication required,
-502 access denied, 503, a timeout, a cut connection) counts as an error, and a failed OVER/XOVER
-fails the job; it is then not recorded, so a later run fetches what is missing.
+fetched, answered 423/430 (no such article), or was too big: an article over 1 MiB, with a line
+over 1 MiB, or whose body as stored in the mbox (quotes included) reaches 1 MiB, is read but not
+written, and counted as `too-big`. mbox2nntp, which imports these mboxes, has the same limits; a
+longer line would stop its parser for the rest of the file. Any other answer (480 authentication
+required, 502 access denied, 503, a timeout, a cut connection) counts as an error, and a failed
+OVER/XOVER fails the job; it is then not recorded, so a later run fetches what is missing.
 
 Each line of `completed_newsgroups.log` is one job, `mbox<TAB>group`, so groups that share an mbox
 (`-g a>x.mbox -g b>x.mbox`) are recorded and skipped each on its own. A line with only an mbox
@@ -217,7 +218,9 @@ imports it (its `internal/mboxout` is the reference):
 
 Nothing else changes: bytes are kept as they are, including 8-bit text and a CR inside a line.
 
-Articles over 1 MiB, or with a line over 1 MiB, are not written (see "Exit codes" below).
+Articles over 1 MiB, or with a line over 1 MiB, are not written, and neither is one whose body as
+stored (with the `>` quotes and the empty line after it) reaches 1 MiB, mbox2nntp's own limit
+(see "Exit codes" above).
 
 ### Crash safety
 

@@ -15,7 +15,7 @@ from typing import Callable, List, Optional, Tuple
 
 from .creds import resolve_credentials
 from .fetch import fetch_articles_parallel
-from .mboxout import MboxWriter
+from .mboxout import ArticleTooBig, MboxWriter
 from .nntp import DEFAULT_RESPONSE_TIMEOUT, MAX_ARTICLE, NNTPClient, NNTPError, is_missing_article, is_too_big
 from .overview import find_articles_in_date_range
 from .plugins import RawArticle, apply_plugins, parse_plugin_spec, removes_message_id
@@ -368,7 +368,14 @@ def pull_group(
                     articles_skipped += 1
                     return
                 body = msg.to_bytes()
-            if writer.write(body, dt=row.date, message_id=row.message_id or None):
+            try:
+                written = writer.write(body, dt=row.date, message_id=row.message_id or None)
+            except ArticleTooBig as e:
+                # mbox2nntp could not import it: skipped and counted, like one over the fetch limit
+                articles_too_big += 1
+                logger.warning("Article %s: %s; skipped", row.article_id, e)
+                return
+            if written:
                 articles_saved += 1
             else:
                 articles_skipped += 1

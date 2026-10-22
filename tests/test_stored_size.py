@@ -97,22 +97,21 @@ class TestStoredBodyLimit(unittest.TestCase):
         sys.modules["gz2mbox"] = gz2mbox
         spec.loader.exec_module(gz2mbox)
         over = digest(b"over", LIMIT)
+        small = HEAD % b"small" + b"body\n"
         with tempfile.TemporaryDirectory() as tmp:
             src = os.path.join(tmp, "in")
             os.makedirs(src)
             with gzip.open(os.path.join(src, "a.gz"), "wb") as fh:
-                fh.write(b"#! rnews %d\n" % len(over) + over)
+                fh.write(b"".join(b"#! rnews %d\n" % len(a) + a for a in (over, small)))
             out = os.path.join(tmp, "out.mbox")
             err = io.StringIO()
             with redirect_stderr(err):
                 rc = gz2mbox.main([src, "-o", out])
             self.assertEqual(rc, 0, err.getvalue())
+            self.assertIn("1 articles written", err.getvalue())
             self.assertIn("1 over", err.getvalue())
-            self.assertFalse(os.path.exists(out) and os.path.getsize(out))
-
-
-for _name in ("test_boundary", "test_pull_counts_it_too_big", "test_gz2mbox_counts_it_too_big"):
-    setattr(TestStoredBodyLimit, _name, unittest.expectedFailure(getattr(TestStoredBodyLimit, _name)))
+            with open(out, "rb") as fh:
+                self.assertNotIn(b"<over@ex.com>", fh.read())
 
 if __name__ == "__main__":
     unittest.main()

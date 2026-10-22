@@ -31,7 +31,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 try:
-    from usenet_archiver.mboxout import MboxLocked, MboxWriter
+    from usenet_archiver.mboxout import ArticleTooBig, MboxLocked, MboxWriter
     from usenet_archiver.nntp import MAX_ARTICLE
 except ImportError as exc:  # pragma: no cover - depends on how it is run
     sys.exit(f"gz2mbox: cannot import usenet_archiver ({exc}); run it from the repository")
@@ -171,7 +171,11 @@ def main(argv: List[str] = None) -> int:
             try:
                 with gzip.open(gz_path, "rb") as fh:
                     for article in articles_from(fh, args.split_on_path, stats, str(rel)):
-                        writer.write(article)
+                        try:
+                            writer.write(article)
+                        except ArticleTooBig:  # its quoted body would be over mbox2nntp's limit
+                            stats.too_big += 1
+                            continue
                         n += 1
                 files_ok += 1
             except (OSError, EOFError, BatchError) as exc:
