@@ -22,6 +22,33 @@ class NNTPError(Exception):
     """Raised for unexpected NNTP protocol responses."""
 
 
+class LineTooLong(NNTPError):
+    """A line over MAX_LINE. The rest of it has been read and dropped, so the
+    stream is still in step."""
+
+
+# Limits on what the server may send. Both are the limits of the importer,
+# mbox2nntp: go-lib-mbox2nntp's mbox.MaxLineLength (1 MiB, a longer line ends
+# the whole file for it) and mbox2nntp's maxArticleSize (1 MiB). The longest
+# line in the archive.org corpus (458 million lines) is 9,991 bytes.
+MAX_LINE = 1 << 20  # bytes, line end included
+MAX_ARTICLE = 1 << 20  # bytes of article content (lines plus LF)
+
+# Default for response_timeout: the most one reply (a status line and its
+# block) may take in all, however slowly the server keeps sending. The
+# socket timeout only covers a single read.
+DEFAULT_RESPONSE_TIMEOUT = 300
+
+# Status prefix (not an NNTP code) for an article that was read but not
+# kept: over MAX_ARTICLE, or with a line over MAX_LINE. It is counted and
+# skipped, like a missing article, since fetching it again cannot help.
+TOO_BIG = "too big:"
+
+
+def is_too_big(resp: str) -> bool:
+    return isinstance(resp, str) and resp.startswith(TOO_BIG)
+
+
 # ARTICLE answers that mean "this article is not there" (RFC 3977 6.2.1: 423
 # no article with that number, 430 no article with that message-id). They are
 # counted as missing. Any other answer that is not 220 is a failure: 480 needs
@@ -60,6 +87,7 @@ class NNTPClient:
         use_ssl: bool = True,
         verbose: bool = False,
         timeout: int = 60,
+        response_timeout: float = DEFAULT_RESPONSE_TIMEOUT,
     ):
         self.server = server
         self.port = port
@@ -68,8 +96,10 @@ class NNTPClient:
         self.use_ssl = use_ssl
         self.verbose = verbose
         self.timeout = timeout
+        self.response_timeout = response_timeout
+        self._deadline: Optional[float] = None  # end of the current reply (monotonic)
         self.conn: Optional[socket.socket] = None
-        self._buf = b""
+        self._buf = bytearray()
         self.current_group: Optional[str] = None  # last group selected with GROUP
         self.capabilities: Dict[str, List[str]] = {}
         self.logger = logging.getLogger(__name__)
@@ -86,7 +116,7 @@ class NNTPClient:
                 context = ssl.create_default_context()
                 sock = context.wrap_socket(sock, server_hostname=self.server)
             self.conn = sock
-            self._buf = b""
+            self._buf = bytearray()
 
             welcome = self._recv_status()
             if self.verbose:
@@ -138,7 +168,7 @@ class NNTPClient:
             except OSError:
                 pass
             self.conn = None
-        self._buf = b""
+        self._buf = bytearray()
 
     def quit(self) -> None:
         try:
@@ -157,43 +187,110 @@ class NNTPClient:
         self.conn.settimeout(self.timeout)
         self.conn.sendall(f"{command}\r\n".encode("ascii", errors="strict"))
 
-    def _recv_raw(self, nbytes: int = 8192) -> bytes:
+    def _recv_raw(self, nbytes: int = 65536) -> bytes:
         if self.conn is None:
             raise NNTPError("Not connected")
-        self.conn.settimeout(self.timeout)
+        timeout = self.timeout
+        if self._deadline is not None:
+            left = self._deadline - time.monotonic()
+            if left <= 0:
+                raise NNTPTimeout(f"reply not complete after {self.response_timeout} s")
+            timeout = min(timeout, left)
+        self.conn.settimeout(timeout)
         try:
             data = self.conn.recv(nbytes)
         except socket.timeout as e:
+            if self._deadline is not None and time.monotonic() >= self._deadline:
+                raise NNTPTimeout(f"reply not complete after {self.response_timeout} s") from e
             raise NNTPTimeout("The read operation timed out") from e
         if not data:
             raise NNTPError("Connection closed by server")
         return data
 
     def _readline(self) -> bytes:
-        """Read one CRLF-terminated line as bytes (CRLF stripped)."""
+        """Read one CRLF-terminated line as bytes (CRLF stripped).
+
+        A line over MAX_LINE raises LineTooLong after the rest of it has been
+        read and dropped: at most MAX_LINE bytes are held at a time.
+        """
+        start = 0
         while True:
-            nl = self._buf.find(b"\n")
+            nl = self._buf.find(b"\n", start)
             if nl >= 0:
-                line = self._buf[:nl]
-                self._buf = self._buf[nl + 1 :]
+                if nl + 1 > MAX_LINE:
+                    del self._buf[: nl + 1]
+                    raise LineTooLong(f"line over {MAX_LINE} bytes")
+                line = bytes(self._buf[:nl])
+                del self._buf[: nl + 1]
                 if line.endswith(b"\r"):
                     line = line[:-1]
                 return line
+            if len(self._buf) > MAX_LINE:
+                self._drop_rest_of_line()
+                raise LineTooLong(f"line over {MAX_LINE} bytes")
+            start = len(self._buf)
             self._buf += self._recv_raw()
 
+    def _drop_rest_of_line(self) -> None:
+        """Read and drop bytes up to and including the next LF."""
+        self._buf.clear()
+        while True:
+            data = self._recv_raw()
+            nl = data.find(b"\n")
+            if nl >= 0:
+                self._buf += data[nl + 1 :]
+                return
+
     def _recv_status(self) -> str:
+        # Each reply starts with its status line: the reply's time starts here.
+        self._deadline = time.monotonic() + self.response_timeout
         line = self._readline()
         try:
             return line.decode("ascii", errors="replace").strip()
         except Exception:
             return line.decode("latin-1", errors="replace").strip()
 
-    def _read_multiline(self) -> List[bytes]:
-        """Read an RFC 3977 dot-terminated multiline response; unstuflines."""
+    def _read_multiline(self, max_lines: Optional[int] = None) -> List[bytes]:
+        """Read an RFC 3977 dot-terminated multiline response; unstuff lines.
+
+        More than max_lines lines raises NNTPError (the reply is then left
+        half read: reconnect).
+        """
         lines: List[bytes] = []
         for line in self._iter_multiline():
             lines.append(line)
+            if max_lines is not None and len(lines) > max_lines:
+                raise NNTPError(f"reply has more than {max_lines} lines")
         return lines
+
+    def _read_article(self) -> Tuple[bytes, bool]:
+        """Read an article block; returns (content, too_big).
+
+        Content is the unstuffed lines joined with LF. An article over
+        MAX_ARTICLE, or with a line over MAX_LINE, is read to its end and
+        dropped (too_big): the stream stays in step and memory bounded.
+        """
+        lines: List[bytes] = []
+        size = 0
+        too_big = False
+        while True:
+            try:
+                line = self._readline()
+            except LineTooLong:
+                too_big, lines = True, []
+                continue
+            if line == b".":
+                break
+            if too_big:
+                continue
+            if line.startswith(b"."):
+                line = line[1:]
+            size += len(line) + 1
+            if size > MAX_ARTICLE:
+                too_big, lines = True, []
+                continue
+            lines.append(line)
+        return (b"" if too_big else b"\n".join(lines)), too_big
 
     def _iter_multiline(self) -> Iterable[bytes]:
         while True:
@@ -203,22 +300,6 @@ class NNTPClient:
             if line.startswith(b"."):
                 line = line[1:]
             yield line
-
-    def recv_article_body(self) -> bytes:
-        """Read a multiline article body with timeout retries; return joined bytes."""
-        retries = 3
-        while retries > 0:
-            try:
-                parts = list(self._iter_multiline())
-                return b"\n".join(parts)
-            except NNTPTimeout:
-                retries -= 1
-                if retries == 0:
-                    raise NNTPTimeout("The read operation timed out after retries")
-                self.logger.warning("Timeout in recv_article_body, retries left: %s", retries)
-                time.sleep(1)
-                # After a timeout the stream is desynchronized; caller must reconnect.
-                raise
 
     # --- protocol helpers --------------------------------------------------
 
@@ -286,7 +367,8 @@ class NNTPClient:
         Sends all requests in ``article_specs`` before reading any response,
         which hides per-article round-trip latency. Returns one triple per
         input: ``(spec, content_bytes, status_line)``. Missing articles yield
-        empty ``content_bytes``.
+        empty ``content_bytes``; so does an article over the limits, with a
+        status line starting with TOO_BIG.
         """
         if not article_specs:
             return []
@@ -302,7 +384,10 @@ class NNTPClient:
             if not resp.startswith("220"):
                 results.append((spec, b"", resp))
                 continue
-            content = b"\n".join(self._read_multiline())
+            content, too_big = self._read_article()
+            if too_big:
+                results.append((spec, b"", f"{TOO_BIG} {resp} (over {MAX_ARTICLE} bytes, or a line over {MAX_LINE})"))
+                continue
             if self.verbose and content:
                 print(f"Fetched article {spec} (first 100 bytes): {content[:100]!r}...")
             results.append((spec, content, resp))
@@ -329,7 +414,8 @@ class NNTPClient:
             if self.verbose:
                 print(f"{cmd} {start_id}-{end_id} response: {resp}")
             if resp.startswith("224"):
-                return self._read_multiline(), cmd, resp
+                # one line per article at most: a longer reply is hostile or out of step
+                return self._read_multiline(max_lines=end_id - start_id + 1), cmd, resp
             if resp.startswith("423"):  # no articles in that range
                 return [], cmd, resp
             # 500/501/502 = not supported; try next
@@ -353,7 +439,7 @@ class NNTPClient:
         if not resp.startswith("221"):
             raise NNTPError(f"XHDR DATE {start_id}-{end_id} failed: {resp}")
         result: List[Tuple[int, str]] = []
-        for raw in self._read_multiline():
+        for raw in self._read_multiline(max_lines=end_id - start_id + 1):
             try:
                 line = raw.decode("ascii", errors="replace")
             except Exception:

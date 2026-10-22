@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -610,52 +611,156 @@ func TestAuth(t *testing.T) {
 }
 
 // TestNeverEndingReply: a reply that never ends, fast (Endless) or one byte
-// at a time (Drip), must not keep the CLI busy: with -t 2 it must give up by
-// itself within 20 s, must not exit 0 or record the pull, and may write only
-// whole articles. The server would go on for 60 s (the testkit deadline).
+// at a time (Drip), must not keep the CLI busy. With --response-timeout 3 it
+// must give up by itself within 20 s, not exit 0 and not record the pull,
+// and may write only whole articles. The server would go on for 60 s (the
+// testkit deadline).
 func TestNeverEndingReply(t *testing.T) {
 	arts := []fakeserver.Article{art("<1@x>", "one"), art("<2@x>", "two"), art("<3@x>", "three")}
-	cases := map[string]struct {
-		f       fakeserver.Faults
-		finding string
-	}{
-		"OVER endless":          {fakeserver.Faults{Endless: map[string]bool{"OVER": true, "XOVER": true}}, "1.4, 3.3"},
-		"ARTICLE endless":       {fakeserver.Faults{Endless: map[string]bool{"ARTICLE": true}}, "3.3"},
-		"ARTICLE drip, endless": {fakeserver.Faults{Endless: map[string]bool{"ARTICLE": true}, Drip: map[string]time.Duration{"ARTICLE": 100 * time.Millisecond}}, "3.2"},
+	cases := map[string]fakeserver.Faults{
+		"OVER endless":          {Endless: map[string]bool{"OVER": true, "XOVER": true}},
+		"ARTICLE endless":       {Endless: map[string]bool{"ARTICLE": true}},
+		"ARTICLE drip, endless": {Endless: map[string]bool{"ARTICLE": true}, Drip: map[string]time.Duration{"ARTICLE": 100 * time.Millisecond}},
 	}
-	for name, c := range cases {
-		c := c
+	for name, f := range cases {
+		f := f
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			srv, _ := newServer(t, arts, c.f)
-			knownBug(t, c.finding, func(t T) {
-				r := pullWithin(t, 20*time.Second, srv.Addr(), "")
-				if r.hung {
-					t.Errorf("still running after 20 s: killed")
-				} else if r.exit == 0 {
-					t.Errorf("exit code 0")
-				}
-				if r.completed {
-					t.Errorf("recorded as completed")
-				}
-				onlyWholeArticles(t, r.mbox, arts)
-			})
+			srv, _ := newServer(t, arts, f)
+			r := pullWithin(t, 20*time.Second, srv.Addr(), "", "--response-timeout", "3")
+			if r.hung {
+				t.Errorf("still running after 20 s: killed")
+			} else if r.exit == 0 {
+				t.Errorf("exit code 0")
+			}
+			if r.completed {
+				t.Errorf("recorded as completed")
+			}
+			onlyWholeArticles(t, r.mbox, arts)
 		})
 	}
 }
 
 // TestOverlongLine: an article with a line over go-lib-mbox2nntp's 1 MiB
-// limit cannot be imported. It must not be written, because the parser stops
-// at that line and every article after it in the mbox would be lost too, and
-// the pull must not be recorded as completed.
+// limit cannot be imported, and the parser would stop at that line, losing
+// every article after it in the mbox. It is skipped and counted, not
+// written; fetching it again cannot help, so the pull completes.
 func TestOverlongLine(t *testing.T) {
 	arts := []fakeserver.Article{art("<1@x>", "one"), art("<2@x>", "two"), art("<3@x>", "three")}
 	srv, _ := newServer(t, arts, fakeserver.Faults{LongLine: map[string]int{"ARTICLE": 2 << 20}})
-	knownBug(t, "3.3", func(t T) {
-		r := pull(t, srv.Addr(), "")
-		readMbox(t, r.mbox) // reports a line over the limit
-		if r.completed || r.exit == 0 {
-			t.Errorf("exit %d completed %v", r.exit, r.completed)
+	r := pull(t, srv.Addr(), "")
+	if got, _ := readMbox(t, r.mbox); len(got) != 0 {
+		t.Errorf("%d messages written, want 0", len(got))
+	}
+	if r.exit != 0 || !r.completed {
+		t.Errorf("exit %d completed %v\n%s", r.exit, r.completed, r.output)
+	}
+	if !strings.Contains(r.output, "too-big=3") {
+		t.Errorf("too-big articles not counted:\n%s", r.output)
+	}
+}
+
+// TestArticleOverLimit: an article over 1 MiB (mbox2nntp's article limit)
+// in short lines is skipped and counted; the others are written whole.
+func TestArticleOverLimit(t *testing.T) {
+	var big []string
+	for i := 0; i < 1100; i++ {
+		big = append(big, strings.Repeat("b", 999))
+	}
+	arts := []fakeserver.Article{art("<1@x>", "one"), art("<big@x>", big...), art("<3@x>", "three")}
+	srv, _ := newServer(t, arts, fakeserver.Faults{})
+	r := pull(t, srv.Addr(), "")
+	expectAll(t, r.mbox, []fakeserver.Article{arts[0], arts[2]})
+	if r.exit != 0 || !r.completed || !strings.Contains(r.output, "too-big=1") {
+		t.Errorf("exit %d completed %v\n%s", r.exit, r.completed, r.output)
+	}
+}
+
+// pullSignalled runs the CLI like pull and sends it sig after the given
+// time; it returns the result once the CLI has exited (killed after 30 s).
+func pullSignalled(t T, addr, dir string, after time.Duration, sig os.Signal) pullResult {
+	t.Helper()
+	args := []string{"-m", "usenet_archiver", "-c", "pull", "-s", addr, "--no-ssl", "--no-netrc",
+		"-g", group, "-C", "2", "-D", "4", "-t", "2"}
+	cmd := exec.Command("python3", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+uaSrc(t), "NNTPSERVER=", "NNTP_PASSWORD=")
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting the CLI: %v", err)
+	}
+	timer := time.AfterFunc(after, func() { cmd.Process.Signal(sig) })
+	defer timer.Stop()
+	hard := time.AfterFunc(after+30*time.Second, func() { cmd.Process.Kill() })
+	defer hard.Stop()
+	err := cmd.Wait()
+	r := pullResult{dir: dir, mbox: filepath.Join(dir, group+".mbox"), output: out.String()}
+	if ee, ok := err.(*exec.ExitError); ok {
+		r.exit = ee.ExitCode()
+		if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL && sig != os.Kill {
+			r.hung = true
 		}
-	})
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "completed_newsgroups.log")); err == nil {
+		r.completed = strings.Contains(string(b), group)
+	}
+	return r
+}
+
+// manyArticles serves n articles, each reply 3 ms late, so a pull takes
+// a few seconds and a signal arrives in the middle of it.
+func manyArticles(t *testing.T, n int) (*fakeserver.Server, []fakeserver.Article) {
+	var arts []fakeserver.Article
+	for i := 1; i <= n; i++ {
+		arts = append(arts, art(fmt.Sprintf("<%d@many>", i), fmt.Sprintf("article %d", i), strings.Repeat("text ", 40), "end"))
+	}
+	srv, _ := newServer(t, arts, fakeserver.Faults{Delay: map[string]time.Duration{"ARTICLE": 3 * time.Millisecond}})
+	return srv, arts
+}
+
+// TestKilledPullThenRerun: a pull killed with SIGKILL (no cleanup at all)
+// leaves whatever it leaves; the next run must end with every article
+// exactly once and byte-identical. A regression guard: since each message
+// is one write() call, SIGKILL alone no longer cuts one; the cut cases
+// (power loss, disk full, a signal inside the write) are unit tests in
+// tests/test_write_safety.py.
+func TestKilledPullThenRerun(t *testing.T) {
+	srv, arts := manyArticles(t, 1500)
+	dir := t.TempDir()
+	killed := pullSignalled(t, srv.Addr(), dir, 1500*time.Millisecond, os.Kill)
+	if killed.completed {
+		t.Fatalf("finished before the kill; make the pull slower")
+	}
+	r := pull(t, srv.Addr(), dir)
+	if r.exit != 0 || !r.completed {
+		t.Errorf("rerun: exit %d completed %v\n%s", r.exit, r.completed, r.output)
+	}
+	expectAll(t, r.mbox, arts)
+}
+
+// TestSigtermMidPull: SIGTERM stops the pull by itself, promptly, with exit
+// code 4, whole articles only and the mbox closed (no journal left); the job
+// is not recorded. A rerun then completes it. A regression guard: the old
+// deadlock needed the signal inside MboxWriter.write, which a timed signal
+// rarely hits; tests/test_write_safety.py delivers it there.
+func TestSigtermMidPull(t *testing.T) {
+	srv, arts := manyArticles(t, 1500)
+	dir := t.TempDir()
+	r := pullSignalled(t, srv.Addr(), dir, 1500*time.Millisecond, syscall.SIGTERM)
+	if r.hung {
+		t.Fatalf("did not exit within 30 s of SIGTERM\n%s", r.output)
+	}
+	if r.exit != 4 || r.completed {
+		t.Errorf("after SIGTERM: exit %d (want 4) completed %v\n%s", r.exit, r.completed, r.output)
+	}
+	if _, err := os.Stat(r.mbox + ".inprogress"); err == nil {
+		t.Errorf("journal left behind: the mbox was not closed")
+	}
+	onlyWholeArticles(t, r.mbox, arts)
+	r2 := pull(t, srv.Addr(), dir)
+	if r2.exit != 0 || !r2.completed {
+		t.Errorf("rerun: exit %d completed %v", r2.exit, r2.completed)
+	}
+	expectAll(t, r2.mbox, arts)
 }

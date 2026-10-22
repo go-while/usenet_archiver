@@ -3,11 +3,21 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import logging
+import os
 import threading
 from datetime import datetime, timezone
 from email.utils import parseaddr, parsedate_to_datetime
 from typing import BinaryIO, List, Optional, Set, Tuple
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows: no locking
+    fcntl = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
 
 
 # English weekday / month abbreviations (locale-independent).
@@ -202,8 +212,11 @@ def write_mbox_message(handle: BinaryIO, article: bytes, dt: Optional[datetime] 
     handle.write(format_mbox_message(article, dt, sender_from_article(article)))
 
 
-def index_message_ids(mbox_path: str) -> Set[str]:
+def index_message_ids(mbox_path: str, limit: Optional[int] = None) -> Set[str]:
     """Dedup keys (see article_key) of every message in an existing mbox.
+
+    With limit, only the first limit bytes are read (the whole messages; see
+    complete_size).
 
     Only header blocks are read: an envelope line ("From " at the start of
     the file or after an empty line) up to the next empty line. A body line
@@ -216,7 +229,11 @@ def index_message_ids(mbox_path: str) -> Set[str]:
     prev_empty = True
     try:
         with open(mbox_path, "rb") as fh:
+            pos = 0
             for raw in fh:
+                pos += len(raw)
+                if limit is not None and pos > limit:
+                    break
                 line = raw.rstrip(b"\r\n")
                 if head is not None:
                     if line == b"":
@@ -240,39 +257,157 @@ def _key_from_head(head: List[bytes]) -> str:
     return msgid_key(mid) if mid else _nomid_key(head)
 
 
-class MboxWriter:
-    """Append-mode mbox writer with optional Message-ID deduplication.
+JOURNAL_SUFFIX = ".inprogress"
 
-    Thread-safe. Flushes every ``flush_every`` writes (and on close) instead of
-    after every article.
+
+class MboxLocked(OSError):
+    """Another process is writing this mbox."""
+
+
+def journal_path(path: str) -> str:
+    """The journal of an mbox being written: the size of its whole messages."""
+    return path + JOURNAL_SUFFIX
+
+
+def complete_size(path: str) -> Tuple[int, int, str]:
+    """(file size, size of its whole messages, how that was found).
+
+    With a journal (left by a run that did not close the mbox: killed,
+    crashed, power lost) the whole messages end where it says. Without one,
+    a file that does not end in a line end was certainly cut in the middle
+    of a message, which is then dropped back to the last envelope line. A
+    file that ends in a line end is taken as complete: other writers end an
+    mbox with a single LF.
+    """
+    try:
+        size = os.path.getsize(path)
+    except FileNotFoundError:
+        return 0, 0, "no file"
+    try:
+        with open(journal_path(path), "rb") as fh:
+            done = int(fh.read().strip() or b"0")
+        return size, min(done, size), "journal"
+    except (FileNotFoundError, ValueError):
+        pass
+    if size == 0:
+        return 0, 0, "empty"
+    with open(path, "rb") as fh:
+        fh.seek(size - 1)
+        if fh.read(1) == b"\n":
+            return size, size, "ends with a line end"
+        # find the last envelope line: "From " at the start of the file or after "\n\n"
+        end = size
+        block = 1 << 20
+        carry = b""
+        while end > 0:
+            start = max(0, end - block)
+            fh.seek(start)
+            chunk = fh.read(end - start) + carry
+            i = chunk.rfind(b"\n\nFrom ")
+            if i >= 0:
+                return size, start + i + 2, "cut message dropped"
+            carry = chunk[:7]
+            end = start
+        return size, 0, "cut message dropped"
+
+
+class MboxWriter:
+    """Append-mode mboxrd writer with Message-ID deduplication, safe against
+    crashes and other writers.
+
+    - Each message goes to disk in one os.write on an O_APPEND descriptor; a
+      write that fails half way (disk full, Ctrl-C) is cut back off.
+    - While the mbox is open, its journal (path + ".inprogress") holds the
+      size of the messages already fsynced; it is updated every flush_every
+      messages, and removed by close() after a last fsync. A run that did not
+      close the mbox leaves it behind, and the next one cuts the file back to
+      that size before it reads the Message-IDs, so a half-written article is
+      neither kept nor taken for present.
+    - open() takes an exclusive lock (flock); a second writer gets MboxLocked.
+
+    has_message_id() works before open() and changes nothing (dry runs).
     """
 
     def __init__(self, path: str, dedup: bool = True, flush_every: int = 100):
         self.path = path
         self.dedup = dedup
         self.flush_every = max(1, flush_every)
-        self._seen: Set[str] = index_message_ids(path) if dedup else set()
-        self._fh: Optional[BinaryIO] = None
+        _size, self._indexed_size, _how = complete_size(path)
+        self._seen: Set[str] = index_message_ids(path, self._indexed_size) if dedup else set()
+        self._fd: Optional[int] = None
         self._lock = threading.Lock()
-        self._since_flush = 0
+        self._good = 0  # end of the last whole message
+        self._sep = b""  # written before the next envelope line
+        self._since_commit = 0
+        self.writing = False  # inside os.write: a signal handler must not stop us here
         self.written = 0
         self.skipped_dup = 0
         self.bytes_written = 0
 
     def open(self) -> None:
         with self._lock:
-            if self._fh is None:
-                self._fh = open(self.path, "ab")
+            self._open_locked()
+
+    def _open_locked(self) -> None:
+        if self._fd is not None:
+            return
+        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise MboxLocked(errno.EAGAIN, "another process is writing this mbox", self.path)
+            size, good, how = complete_size(self.path)
+            if good < size:
+                logger.warning(
+                    "%s: dropping %s bytes after the last whole message (%s)", self.path, size - good, how
+                )
+                os.ftruncate(fd, good)
+            if self.dedup and good != self._indexed_size:
+                self._seen = index_message_ids(self.path, good)
+                self._indexed_size = good
+            self._good = good
+            self._sep = b""
+            if good > 0:
+                with open(self.path, "rb") as fh:
+                    fh.seek(max(0, good - 2))
+                    tail = fh.read(2)
+                # the next envelope line must follow an empty line
+                self._sep = b"" if tail == b"\n\n" else (b"\n" if tail.endswith(b"\n") else b"\n\n")
+            self._write_journal()
+        except BaseException:
+            os.close(fd)
+            raise
+        self._fd = fd
+
+    def _write_journal(self) -> None:
+        tmp = journal_path(self.path) + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(b"%d\n" % self._good)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, journal_path(self.path))
+
+    def _commit(self) -> None:
+        """fsync the messages written so far, then record their end."""
+        os.fsync(self._fd)
+        self._write_journal()
+        self._since_commit = 0
 
     def close(self) -> None:
+        """fsync and close; raises if the data could not be written."""
         with self._lock:
-            if self._fh is not None:
-                try:
-                    self._fh.flush()
-                finally:
-                    self._fh.close()
-                    self._fh = None
-                    self._since_flush = 0
+            fd, self._fd = self._fd, None
+            if fd is None:
+                return
+            try:
+                if os.fstat(fd).st_size > self._good:
+                    os.ftruncate(fd, self._good)
+                os.fsync(fd)
+                os.remove(journal_path(self.path))
+            finally:
+                os.close(fd)  # also releases the lock
 
     def __enter__(self) -> "MboxWriter":
         self.open()
@@ -295,20 +430,36 @@ class MboxWriter:
         is not used for it.
         """
         mid = article_key(article)
+        if dt is None:
+            dt = date_from_article(article)
+        data = format_mbox_message(article, dt, sender_from_article(article))
         with self._lock:
             if self.dedup and mid in self._seen:
                 self.skipped_dup += 1
                 return False
-            if self._fh is None:
-                self._fh = open(self.path, "ab")
-            before = self._fh.tell()
-            write_mbox_message(self._fh, article, dt=dt)
-            after = self._fh.tell()
-            self.bytes_written += max(0, after - before)
-            self._since_flush += 1
-            if self._since_flush >= self.flush_every:
-                self._fh.flush()
-                self._since_flush = 0
+            self._open_locked()
+            data = self._sep + data
+            self.writing = True
+            try:
+                view = memoryview(data)
+                while view:
+                    n = os.write(self._fd, view)
+                    view = view[n:]
+            except BaseException:
+                # half a message must not stay: cut back to the last whole one
+                try:
+                    os.ftruncate(self._fd, self._good)
+                except OSError:
+                    pass
+                raise
+            finally:
+                self.writing = False
+            self._sep = b""
+            self._good += len(data)
+            self.bytes_written += len(data)
             self._seen.add(mid)
             self.written += 1
+            self._since_commit += 1
+            if self._since_commit >= self.flush_every:
+                self._commit()
             return True
