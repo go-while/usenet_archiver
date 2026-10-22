@@ -149,6 +149,21 @@ Short and long forms are interchangeable (e.g. `-s` / `--server`, `-u` / `--user
 
 See `usenet-archiver -c COMMAND --help` for per-command details.
 
+### Exit codes and completed jobs
+
+A job is written to `completed_newsgroups.log` only when every article the overview listed was
+fetched or answered 423/430 (no such article). Any other answer (480 authentication required,
+502 access denied, 503, a timeout, a cut connection) counts as an error, and a failed OVER/XOVER
+fails the job; it is then not recorded, so a later run fetches what is missing.
+
+| Exit | Meaning |
+|------|---------|
+| 0 | every group complete |
+| 1 | at least one group failed or is incomplete (see the log) |
+| 2 | usage or configuration error (e.g. no server) |
+| 3 | connection failed |
+| 4 | NNTP error, or terminated by a signal |
+
 ### Example
 
 ```bash

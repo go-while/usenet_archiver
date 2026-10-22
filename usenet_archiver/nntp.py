@@ -22,6 +22,18 @@ class NNTPError(Exception):
     """Raised for unexpected NNTP protocol responses."""
 
 
+# ARTICLE answers that mean "this article is not there" (RFC 3977 6.2.1: 423
+# no article with that number, 430 no article with that message-id). They are
+# counted as missing. Any other answer that is not 220 is a failure: 480 needs
+# authentication, 502 is access denied, 400/403/503 are server trouble.
+MISSING_ARTICLE = ("423", "430")
+
+
+def is_missing_article(resp: str) -> bool:
+    """True when an ARTICLE status line says the article does not exist."""
+    return isinstance(resp, str) and resp.startswith(MISSING_ARTICLE)
+
+
 class NNTPClient:
     def __init__(
         self,
@@ -267,7 +279,10 @@ class NNTPClient:
     def over(self, start_id: int, end_id: int) -> Tuple[List[bytes], str, str]:
         """Issue OVER or XOVER for an article-number range.
 
-        Returns (lines, command_used, status_response).
+        Returns (lines, command_used, status_response). 423 (no articles in
+        the range) gives no lines. When the server knows neither command
+        (500/501/502 to both), command_used is "". Any other answer raises
+        NNTPError: it is a failure, not an empty range.
         """
         commands: Sequence[str] = ("OVER", "XOVER")
         # Prefer OVER when advertised; still try both.
@@ -283,22 +298,28 @@ class NNTPClient:
                 print(f"{cmd} {start_id}-{end_id} response: {resp}")
             if resp.startswith("224"):
                 return self._read_multiline(), cmd, resp
+            if resp.startswith("423"):  # no articles in that range
+                return [], cmd, resp
             # 500/501/502 = not supported; try next
             if resp.startswith(("500", "501", "502")):
                 continue
-            # Other errors (e.g. empty range): return empty
-            return [], cmd, resp
+            raise NNTPError(f"{cmd} {start_id}-{end_id} failed: {resp}")
         return [], "", last_resp
 
     def xhdr_date(self, start_id: int, end_id: int) -> List[Tuple[int, str]]:
-        """XHDR DATE fallback; returns list of (article_id, date_string)."""
+        """XHDR DATE fallback; returns list of (article_id, date_string).
+
+        423 (no articles in the range) gives []; any other failure raises
+        NNTPError.
+        """
         self.send(f"XHDR DATE {start_id}-{end_id}")
         resp = self._recv_status()
         if self.verbose:
             print(f"XHDR DATE {start_id}-{end_id} response: {resp}")
-        if not resp.startswith("221"):
-            self.logger.warning("XHDR DATE not supported or failed: %s", resp)
+        if resp.startswith("423"):
             return []
+        if not resp.startswith("221"):
+            raise NNTPError(f"XHDR DATE {start_id}-{end_id} failed: {resp}")
         result: List[Tuple[int, str]] = []
         for raw in self._read_multiline():
             try:

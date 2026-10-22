@@ -18,7 +18,7 @@ from typing import Callable, List, Optional, Tuple
 from .creds import resolve_credentials
 from .fetch import fetch_articles_parallel
 from .mboxout import MboxWriter
-from .nntp import NNTPClient, NNTPError
+from .nntp import NNTPClient, NNTPError, is_missing_article
 from .overview import find_articles_in_date_range
 from .plugins import apply_plugins, parse_plugin_spec
 
@@ -206,7 +206,10 @@ def pull_group(
     pipeline_depth: int = 32,
     skip_completed: bool = False,
     dry_run: bool = False,
-) -> None:
+) -> bool:
+    """Pull one group. Returns True when the job is complete (recorded in
+    completed_newsgroups.log, or nothing to do) and False when it did not get
+    every article; raises on a failure that stops it."""
     global _ACTIVE_WRITER
 
     # Optional short-circuit: skip an exact job name already in the completed log.
@@ -225,7 +228,7 @@ def pull_group(
                         mbox_filename,
                         completed_log,
                     )
-                    return
+                    return True
                 if mbox_filename in done and not os.path.exists(mbox_filename):
                     logger.info(
                         "%s is listed in %s but the mbox is missing; pulling again",
@@ -240,10 +243,10 @@ def pull_group(
     if first == 0 and last == 0:
         if dry_run:
             logger.info("DRY-RUN: group %s is empty (would write %s)", group, mbox_filename)
-            return
+            return True
         logger.info("Group %s is empty", group)
         mark_completed(completed_log, mbox_filename, logger)
-        return
+        return True
 
     rows = find_articles_in_date_range(
         client,
@@ -280,12 +283,12 @@ def pull_group(
             date_note,
             plugin_note,
         )
-        return
+        return True
 
     if not rows:
         logger.info("Nothing to fetch for %s", group)
         mark_completed(completed_log, mbox_filename, logger)
-        return
+        return True
 
     _ACTIVE_WRITER = writer
     articles_saved = 0
@@ -300,12 +303,12 @@ def pull_group(
             if _TERMINATED:
                 return
             if not content:
-                if isinstance(resp, str) and resp.startswith("error:"):
-                    articles_errors += 1
-                    logger.debug("Article %s error: %s", row.article_id, resp)
-                else:
+                if is_missing_article(resp):
                     articles_missing += 1
                     logger.debug("Article %s missing: %s", row.article_id, resp)
+                else:  # "error: ..." or a status such as 480/502
+                    articles_errors += 1
+                    logger.warning("Article %s failed: %s", row.article_id, resp)
                 return
             body = content
             if plugins:
@@ -370,8 +373,9 @@ def pull_group(
                 rows_to_fetch,
                 completed_log,
             )
-            return
+            return False
         mark_completed(completed_log, mbox_filename, logger)
+        return True
     finally:
         writer.close()
         _ACTIVE_WRITER = None
@@ -765,6 +769,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
 
         completed_log = "completed_newsgroups.log"
+        incomplete = 0  # groups that failed or did not get every article
         for group, filename in group_specs:
             mbox_filename = mbox_name_for(group, filename, start_date, end_date)
             log_filename = mbox_filename.rsplit(".", 1)[0] + ".log"
@@ -783,7 +788,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "timeout": args.timeout,
             }
             try:
-                pull_group(
+                done = pull_group(
                     client=client,
                     group=group,
                     mbox_filename=mbox_filename,
@@ -800,14 +805,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                     skip_completed=args.skip_completed,
                     dry_run=args.dry_run,
                 )
+                if not done:
+                    incomplete += 1
             except TerminatedBySignal:
                 logger.warning("Terminated while processing %s", group)
                 return 4
             except Exception as e:
                 logger.error("Failed group %s: %s", group, e)
+                incomplete += 1
             finally:
                 logging.getLogger().removeHandler(file_handler)
                 file_handler.close()
+        if incomplete:
+            logger.error("%s of %s group(s) failed or are incomplete", incomplete, len(group_specs))
+            return 1
         return 0
     except TerminatedBySignal:
         return 4

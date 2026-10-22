@@ -455,33 +455,28 @@ func seq(a, b int) []int {
 // articles from the server.
 func TestFaultsNotCompleted(t *testing.T) {
 	arts := []fakeserver.Article{art("<1@x>", "one"), art("<2@x>", "two", "three", "four"), art("<3@x>", "five")}
-	cases := map[string]struct {
-		f       fakeserver.Faults
-		finding string
-	}{
-		"ARTICLE 480":           {fakeserver.Faults{Override: map[string][]string{"ARTICLE": {"480 authentication required"}}}, "1.2, 4.2"},
-		"ARTICLE 502":           {fakeserver.Faults{Override: map[string][]string{"ARTICLE": {"502 access denied"}}}, "1.2, 4.2"},
-		"ARTICLE 503":           {fakeserver.Faults{Override: map[string][]string{"ARTICLE": {"503 temporary failure"}}}, "1.2, 4.2"},
-		"OVER 503":              {fakeserver.Faults{Override: map[string][]string{"OVER": {"503 overview unavailable"}, "XOVER": {"503 overview unavailable"}}}, "1.3, 4.2"},
-		"OVER stalls":           {fakeserver.Faults{Delay: map[string]time.Duration{"OVER": 5 * time.Second, "XOVER": 5 * time.Second}}, "1.4, 4.2"},
-		"ARTICLE stalls":        {fakeserver.Faults{Delay: map[string]time.Duration{"ARTICLE": 5 * time.Second}}, "4.2"},
-		"ARTICLE cut mid-reply": {fakeserver.Faults{DropInMultiline: map[string]int{"ARTICLE": 8}}, "4.2"},
+	cases := map[string]fakeserver.Faults{
+		"ARTICLE 480":           {Override: map[string][]string{"ARTICLE": {"480 authentication required"}}},
+		"ARTICLE 502":           {Override: map[string][]string{"ARTICLE": {"502 access denied"}}},
+		"ARTICLE 503":           {Override: map[string][]string{"ARTICLE": {"503 temporary failure"}}},
+		"OVER 503":              {Override: map[string][]string{"OVER": {"503 overview unavailable"}, "XOVER": {"503 overview unavailable"}}},
+		"OVER stalls":           {Delay: map[string]time.Duration{"OVER": 5 * time.Second, "XOVER": 5 * time.Second}},
+		"ARTICLE stalls":        {Delay: map[string]time.Duration{"ARTICLE": 5 * time.Second}},
+		"ARTICLE cut mid-reply": {DropInMultiline: map[string]int{"ARTICLE": 8}},
 	}
-	for name, c := range cases {
-		c := c
+	for name, f := range cases {
+		f := f
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			srv, _ := newServer(t, arts, c.f)
-			knownBug(t, c.finding, func(t T) {
-				r := pull(t, srv.Addr(), "")
-				if r.completed {
-					t.Errorf("recorded as completed")
-				}
-				if r.exit == 0 {
-					t.Errorf("exit code 0")
-				}
-				onlyWholeArticles(t, r.mbox, arts)
-			})
+			srv, _ := newServer(t, arts, f)
+			r := pull(t, srv.Addr(), "")
+			if r.completed {
+				t.Errorf("recorded as completed")
+			}
+			if r.exit == 0 {
+				t.Errorf("exit code 0")
+			}
+			onlyWholeArticles(t, r.mbox, arts)
 		})
 	}
 }

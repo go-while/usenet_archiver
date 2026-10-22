@@ -108,9 +108,13 @@ FetchOverview = Callable[[int, int], List[OverviewRow]]
 
 
 def fetch_overview_chunk(client, start_id: int, end_id: int) -> List[OverviewRow]:
-    """Fetch overview rows for [start_id, end_id] via OVER/XOVER or XHDR DATE."""
+    """Fetch overview rows for [start_id, end_id] via OVER/XOVER or XHDR DATE.
+
+    XHDR is used only when the server knows neither OVER nor XOVER. A failure
+    raises: an empty result always means the range holds no articles.
+    """
     lines, cmd, resp = client.over(start_id, end_id)
-    if cmd and resp.startswith("224"):
+    if cmd:
         rows = []
         for raw in lines:
             row = parse_overview_line(raw)
@@ -242,12 +246,8 @@ def _scan_chunks(
     cursor = start_id
     while cursor <= end_id:
         chunk_end = min(end_id, cursor + chunk_size - 1)
-        try:
-            rows = fetch(cursor, chunk_end)
-        except Exception as e:
-            logger.warning("Overview chunk %s-%s failed: %s", cursor, chunk_end, e)
-            cursor = chunk_end + 1
-            continue
+        # A failed chunk raises: skipping it would lose its articles silently.
+        rows = fetch(cursor, chunk_end)
         for row in rows:
             if start_d is None and end_d is None:
                 matched.append(row)

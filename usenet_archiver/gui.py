@@ -650,6 +650,7 @@ class UsenetArchiverGUI:
 
             cwd = os.getcwd()
             written = []
+            incomplete = []  # groups that did not get every article
             try:
                 os.chdir(opts["output_dir"])
                 endpoint = resolve_credentials(
@@ -702,7 +703,7 @@ class UsenetArchiverGUI:
                                 mbox_filename,
                             )
                         try:
-                            pull_group(
+                            done = pull_group(
                                 client=client,
                                 group=group,
                                 mbox_filename=mbox_filename,
@@ -722,8 +723,12 @@ class UsenetArchiverGUI:
                         except TerminatedBySignal:
                             return "cancelled"
                         written.append(mbox_filename)
+                        if not done:
+                            incomplete.append(group)
                     if dry_run:
                         return {"dry_run": True, "jobs": written}
+                    if incomplete:
+                        return {"incomplete": incomplete, "jobs": written}
                     return ", ".join(written) if written else None
                 finally:
                     try:
@@ -748,6 +753,15 @@ class UsenetArchiverGUI:
                     "No articles downloaded.\n"
                     f"Planned {len(jobs)} job(s).\n"
                     "See the log for overview / dedup counts.",
+                )
+                return
+            if isinstance(result, dict) and result.get("incomplete"):
+                self._set_status("Incomplete")
+                messagebox.showwarning(
+                    "Incomplete",
+                    "Not every article was fetched for: "
+                    + ", ".join(result["incomplete"])
+                    + "\nThese jobs are not recorded as completed; see the log and run again.",
                 )
                 return
             if result:

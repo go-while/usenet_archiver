@@ -12,7 +12,7 @@ import unittest
 _ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.abspath(_ROOT))
 
-from usenet_archiver.nntp import NNTPClient, NNTPError  # noqa: E402
+from usenet_archiver.nntp import NNTPClient, NNTPError, is_missing_article  # noqa: E402
 
 
 class FakeNNTPServer:
@@ -414,6 +414,46 @@ class TestParallelFetch(unittest.TestCase):
             self.assertEqual(ids, list(range(1, 21)))
         finally:
             server.stop()
+
+
+class TestStatusHandling(unittest.TestCase):
+    """Only 423/430 mean "no such article"; every other failure is an error."""
+
+    def _client(self, server_bytes: bytes) -> NNTPClient:
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        b.sendall(server_bytes)
+        c = NNTPClient("x", 0, timeout=2)
+        c.conn = a
+        return c
+
+    def test_is_missing_article(self):
+        for resp in ("423 no such number", "430 no such article"):
+            self.assertTrue(is_missing_article(resp), resp)
+        for resp in ("480 auth required", "502 access denied", "503 fault", "400 bye", "error: timeout", ""):
+            self.assertFalse(is_missing_article(resp), resp)
+
+    def test_over_423_is_empty(self):
+        c = self._client(b"423 no articles in that range\r\n")
+        lines, cmd, resp = c.over(1, 10)
+        self.assertEqual((lines, cmd), ([], "OVER"))
+
+    def test_over_failure_raises(self):
+        for status in (b"480 authentication required", b"503 overview unavailable", b"412 no group"):
+            c = self._client(status + b"\r\n")
+            with self.assertRaises(NNTPError, msg=status):
+                c.over(1, 10)
+
+    def test_over_unsupported_falls_back(self):
+        c = self._client(b"500 what\r\n500 what\r\n")
+        self.assertEqual(c.over(1, 10)[1], "")
+
+    def test_xhdr_failure_raises(self):
+        c = self._client(b"503 no\r\n")
+        with self.assertRaises(NNTPError):
+            c.xhdr_date(1, 10)
+        self.assertEqual(self._client(b"423 empty\r\n").xhdr_date(1, 10), [])
 
 
 if __name__ == "__main__":
