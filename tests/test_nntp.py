@@ -7,19 +7,23 @@ import os
 import socket
 import sys
 import threading
+import time
 import unittest
 
 _ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.abspath(_ROOT))
 
-from usenet_archiver.nntp import NNTPClient, NNTPError  # noqa: E402
+from usenet_archiver.nntp import NNTPClient, NNTPError, is_missing_article  # noqa: E402
 
 
 class FakeNNTPServer:
     """Minimal NNTP server for unit tests (plain TCP, no TLS)."""
 
-    def __init__(self, articles=None, over_rows=None, fragment=False):
+    def __init__(self, articles=None, over_rows=None, fragment=False, stalls=None):
         self.articles = articles or {}
+        # client line -> [seconds, times]: sleep before replying to that line,
+        # the next `times` times it is seen (None = every time)
+        self.stalls = stalls or {}
         self.over_rows = over_rows or {}
         self.fragment = fragment
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -100,6 +104,11 @@ class FakeNNTPServer:
             except Exception:
                 return
             upper = cmd.upper()
+            stall = self.stalls.get(upper)
+            if stall and stall[1] != 0:
+                if stall[1] is not None:
+                    stall[1] -= 1
+                time.sleep(stall[0])
             if upper.startswith("CAPABILITIES"):
                 self._send(conn, b"101 Capability list:\r\nVERSION 2\r\nREADER\r\nOVER\r\n.\r\n")
             elif upper.startswith("MODE READER"):
@@ -414,6 +423,115 @@ class TestParallelFetch(unittest.TestCase):
             self.assertEqual(ids, list(range(1, 21)))
         finally:
             server.stop()
+
+
+class TestOutOfStep(unittest.TestCase):
+    """After a timeout or a cut the stream is out of step: reconnect, never read on."""
+
+    def _client(self, server_bytes: bytes) -> NNTPClient:
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        b.sendall(server_bytes)
+        c = NNTPClient("x", 0, timeout=2)
+        c.conn = a
+        return c
+
+    def test_reply_for_another_article_raises(self):
+        c = self._client(b"220 7 <x@y>\r\nSubject: s\r\n\r\nb\r\n.\r\n")
+        with self.assertRaises(NNTPError):
+            c.articles_pipelined([3])
+
+    def test_body_line_as_status_raises(self):
+        for line in (b"rest of an earlier article", b"220this", b""):
+            c = self._client(line + b"\r\n")
+            with self.assertRaises(NNTPError, msg=line):
+                c.articles_pipelined([3])
+
+    def test_worker_reconnects_after_last_failure(self):
+        """Article 1 always answers late; 2 and 3 must still pair with their rows.
+
+        Its body holds a line that looks like a status: read on the old
+        connection, the late reply used to be taken for the answer to 2.
+        """
+        from usenet_archiver.fetch import fetch_articles_parallel
+        from usenet_archiver.overview import OverviewRow
+
+        arts = {
+            1: b"Message-ID: <id1@ex.com>\n\nfirst\n220 looks like a status line\nrest of 1",
+            2: b"Message-ID: <id2@ex.com>\n\nsecond",
+            3: b"Message-ID: <id3@ex.com>\n\nthird",
+        }
+        srv = FakeNNTPServer(articles=arts, stalls={"ARTICLE 1": [1.3, None]})
+        srv.start()
+        self.addCleanup(srv.stop)
+        got = {}
+        ok, missing, errors, _ = fetch_articles_parallel(
+            rows=[OverviewRow(article_id=n) for n in (1, 2, 3)],
+            group="misc.test",
+            conn_kwargs=dict(server="127.0.0.1", port=srv.port, use_ssl=False, timeout=1),
+            connections=1,
+            pipeline_depth=1,
+            on_article=lambda row, content, resp: got.__setitem__(row.article_id, (content, resp)),
+        )
+        self.assertEqual((ok, missing, errors), (2, 0, 1))
+        self.assertTrue(got[1][1].startswith("error:"))
+        self.assertIn(b"second", got[2][0])
+        self.assertIn(b"third", got[3][0])
+
+    def test_overview_chunk_retried_on_new_connection(self):
+        from usenet_archiver.overview import find_articles_in_date_range
+
+        arts = {n: b"Message-ID: <id%d@ex.com>\n\nb" % n for n in range(1, 31)}
+        srv = FakeNNTPServer(articles=arts, stalls={"OVER 11-20": [1.3, 1]})
+        srv.start()
+        self.addCleanup(srv.stop)
+        client = NNTPClient("127.0.0.1", srv.port, use_ssl=False, timeout=1)
+        client.connect()
+        self.addCleanup(client.close)
+        client.group("misc.test")
+        rows = find_articles_in_date_range(client, 1, 30, None, None, chunk_size=10)
+        self.assertEqual([r.article_id for r in rows], list(range(1, 31)))
+
+
+class TestStatusHandling(unittest.TestCase):
+    """Only 423/430 mean "no such article"; every other failure is an error."""
+
+    def _client(self, server_bytes: bytes) -> NNTPClient:
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        b.sendall(server_bytes)
+        c = NNTPClient("x", 0, timeout=2)
+        c.conn = a
+        return c
+
+    def test_is_missing_article(self):
+        for resp in ("423 no such number", "430 no such article"):
+            self.assertTrue(is_missing_article(resp), resp)
+        for resp in ("480 auth required", "502 access denied", "503 fault", "400 bye", "error: timeout", ""):
+            self.assertFalse(is_missing_article(resp), resp)
+
+    def test_over_423_is_empty(self):
+        c = self._client(b"423 no articles in that range\r\n")
+        lines, cmd, resp = c.over(1, 10)
+        self.assertEqual((lines, cmd), ([], "OVER"))
+
+    def test_over_failure_raises(self):
+        for status in (b"480 authentication required", b"503 overview unavailable", b"412 no group"):
+            c = self._client(status + b"\r\n")
+            with self.assertRaises(NNTPError, msg=status):
+                c.over(1, 10)
+
+    def test_over_unsupported_falls_back(self):
+        c = self._client(b"500 what\r\n500 what\r\n")
+        self.assertEqual(c.over(1, 10)[1], "")
+
+    def test_xhdr_failure_raises(self):
+        c = self._client(b"503 no\r\n")
+        with self.assertRaises(NNTPError):
+            c.xhdr_date(1, 10)
+        self.assertEqual(self._client(b"423 empty\r\n").xhdr_date(1, 10), [])
 
 
 if __name__ == "__main__":

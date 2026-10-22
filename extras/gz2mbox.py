@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Decompress .gz archives containing Usenet articles into a single mbox file.
 
-Shares mboxrd escaping and envelope helpers with app/mboxout.py when available;
-falls back to local copies when run standalone from extras/.
+Uses the archiver's mboxrd writer (usenet_archiver.mboxout), so the output is
+what mbox2nntp expects. The package must be importable: run this from the
+repository, or with the package on PYTHONPATH.
 """
 
 from __future__ import annotations
@@ -12,66 +13,19 @@ import gzip
 import re
 import sys
 from pathlib import Path
-from typing import BinaryIO, List, Optional
+from typing import List, Optional
 
 ARTICLE_SPLIT_RE = re.compile(rb"\n(?=Path: )")
 
-# Prefer shared helpers from the archiver package.
+# Use the archiver's writer; a separate copy here used to drift from it.
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 try:
-    from usenet_archiver.mboxout import escape_mboxrd, write_mbox_message  # type: ignore
-except ImportError:
-    # Standalone fallback (locale-independent envelope).
-    import email
-    from datetime import datetime, timezone
-    from email.utils import parseaddr, parsedate_to_datetime
-
-    _WDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-    _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
-
-    def escape_mboxrd(data: bytes) -> bytes:
-        data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-        lines = data.split(b"\n")
-        escaped = []
-        for line in lines:
-            if line.startswith(b"From ") and not line.startswith(b">From "):
-                escaped.append(b">" + line)
-            else:
-                escaped.append(line)
-        result = b"\n".join(escaped)
-        if result and not result.endswith(b"\n"):
-            result += b"\n"
-        return result
-
-    def write_mbox_message(handle: BinaryIO, article: bytes, dt=None) -> None:
-        msg = email.message_from_bytes(article)
-        if dt is None:
-            date_hdr = msg.get("Date")
-            if date_hdr:
-                try:
-                    dt = parsedate_to_datetime(date_hdr)
-                except (TypeError, ValueError, OverflowError):
-                    dt = None
-        if dt is None:
-            dt = datetime.now(timezone.utc)
-        elif dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        else:
-            dt = dt.astimezone(timezone.utc)
-        _, addr = parseaddr(msg.get("From", "") or "")
-        if not (addr and "@" in addr):
-            addr = "-"
-        wday = _WDAYS[dt.weekday()]
-        month = _MONTHS[dt.month - 1]
-        timestr = f"{wday} {month} {dt.day:2d} {dt.hour:02d}:{dt.minute:02d}:{dt.second:02d} {dt.year}"
-        handle.write(f"From {addr} {timestr}\n".encode("ascii", errors="replace"))
-        handle.write(escape_mboxrd(article))
-        if not article.endswith(b"\n"):
-            handle.write(b"\n")
-        handle.write(b"\n")
+    from usenet_archiver.mboxout import write_mbox_message
+except ImportError as exc:  # pragma: no cover - depends on how it is run
+    sys.exit(f"gz2mbox: cannot import usenet_archiver.mboxout ({exc}); run it from the repository")
 
 
 def split_articles(data: bytes) -> List[bytes]:

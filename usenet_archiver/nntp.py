@@ -22,6 +22,34 @@ class NNTPError(Exception):
     """Raised for unexpected NNTP protocol responses."""
 
 
+# ARTICLE answers that mean "this article is not there" (RFC 3977 6.2.1: 423
+# no article with that number, 430 no article with that message-id). They are
+# counted as missing. Any other answer that is not 220 is a failure: 480 needs
+# authentication, 502 is access denied, 400/403/503 are server trouble.
+MISSING_ARTICLE = ("423", "430")
+
+
+def is_missing_article(resp: str) -> bool:
+    """True when an ARTICLE status line says the article does not exist."""
+    return isinstance(resp, str) and resp.startswith(MISSING_ARTICLE)
+
+
+def _check_in_step(spec, resp: str) -> None:
+    """Raise NNTPError when resp cannot be the answer to ARTICLE spec.
+
+    A status line is three digits and a space; "220 n <id>" must name the
+    article number asked for. Anything else means the stream is out of step
+    (e.g. the late rest of an earlier reply), and reading on would pair
+    replies with the wrong requests.
+    """
+    if len(resp) < 3 or not resp[:3].isdigit() or (len(resp) > 3 and resp[3] != " "):
+        raise NNTPError(f"ARTICLE {spec}: not a status line, stream out of step: {resp[:80]!r}")
+    if isinstance(spec, int) and resp.startswith("220"):
+        parts = resp.split()
+        if len(parts) >= 2 and parts[1].isdigit() and int(parts[1]) != spec:
+            raise NNTPError(f"ARTICLE {spec}: reply is for article {parts[1]}, stream out of step")
+
+
 class NNTPClient:
     def __init__(
         self,
@@ -42,6 +70,7 @@ class NNTPClient:
         self.timeout = timeout
         self.conn: Optional[socket.socket] = None
         self._buf = b""
+        self.current_group: Optional[str] = None  # last group selected with GROUP
         self.capabilities: Dict[str, List[str]] = {}
         self.logger = logging.getLogger(__name__)
         if verbose:
@@ -88,6 +117,19 @@ class NNTPClient:
         except Exception as e:
             self.close()
             raise NNTPError(f"Connection error: {e}") from e
+
+    def reconnect(self) -> None:
+        """Drop the connection and open a new one, selecting the current group again.
+
+        Use it after any error in the middle of a reply: a timeout or a cut
+        leaves the stream out of step, and the next read would take the rest
+        of the old reply for the answer to a new command.
+        """
+        group = self.current_group
+        self.close()
+        self.connect()
+        if group:
+            self.group(group)
 
     def close(self) -> None:
         if self.conn is not None:
@@ -215,6 +257,7 @@ class NNTPClient:
         if len(parts) < 4:
             raise NNTPError(f"Invalid GROUP response: {resp}")
         first, last = int(parts[2]), int(parts[3])
+        self.current_group = newsgroup
         return first, last, resp
 
     def stat(self, article_id: int) -> Tuple[int, str]:
@@ -255,6 +298,7 @@ class NNTPClient:
             resp = self._recv_status()
             if self.verbose:
                 print(f"ARTICLE {spec} response: {resp}")
+            _check_in_step(spec, resp)
             if not resp.startswith("220"):
                 results.append((spec, b"", resp))
                 continue
@@ -267,7 +311,10 @@ class NNTPClient:
     def over(self, start_id: int, end_id: int) -> Tuple[List[bytes], str, str]:
         """Issue OVER or XOVER for an article-number range.
 
-        Returns (lines, command_used, status_response).
+        Returns (lines, command_used, status_response). 423 (no articles in
+        the range) gives no lines. When the server knows neither command
+        (500/501/502 to both), command_used is "". Any other answer raises
+        NNTPError: it is a failure, not an empty range.
         """
         commands: Sequence[str] = ("OVER", "XOVER")
         # Prefer OVER when advertised; still try both.
@@ -283,22 +330,28 @@ class NNTPClient:
                 print(f"{cmd} {start_id}-{end_id} response: {resp}")
             if resp.startswith("224"):
                 return self._read_multiline(), cmd, resp
+            if resp.startswith("423"):  # no articles in that range
+                return [], cmd, resp
             # 500/501/502 = not supported; try next
             if resp.startswith(("500", "501", "502")):
                 continue
-            # Other errors (e.g. empty range): return empty
-            return [], cmd, resp
+            raise NNTPError(f"{cmd} {start_id}-{end_id} failed: {resp}")
         return [], "", last_resp
 
     def xhdr_date(self, start_id: int, end_id: int) -> List[Tuple[int, str]]:
-        """XHDR DATE fallback; returns list of (article_id, date_string)."""
+        """XHDR DATE fallback; returns list of (article_id, date_string).
+
+        423 (no articles in the range) gives []; any other failure raises
+        NNTPError.
+        """
         self.send(f"XHDR DATE {start_id}-{end_id}")
         resp = self._recv_status()
         if self.verbose:
             print(f"XHDR DATE {start_id}-{end_id} response: {resp}")
-        if not resp.startswith("221"):
-            self.logger.warning("XHDR DATE not supported or failed: %s", resp)
+        if resp.startswith("423"):
             return []
+        if not resp.startswith("221"):
+            raise NNTPError(f"XHDR DATE {start_id}-{end_id} failed: {resp}")
         result: List[Tuple[int, str]] = []
         for raw in self._read_multiline():
             try:
@@ -344,8 +397,9 @@ class NNTPClient:
             raise NNTPError(f"POST rejected: {resp}")
         if self.conn is None:
             raise NNTPError("Not connected")
-        # Dot-stuff lines beginning with '.'
-        lines = message.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+        # Dot-stuff lines beginning with '.'. Only CRLF is a line end: a lone
+        # CR stays inside its line.
+        lines = message.replace(b"\r\n", b"\n").split(b"\n")
         stuffed: List[bytes] = []
         for line in lines:
             if line.startswith(b"."):

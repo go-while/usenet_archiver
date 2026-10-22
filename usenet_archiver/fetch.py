@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Callable, List, Optional, Sequence, Tuple
 
-from .nntp import NNTPClient, NNTPError, NNTPTimeout
+from .nntp import NNTPClient, NNTPError, NNTPTimeout, is_missing_article
 from .overview import OverviewRow
 
 logger = logging.getLogger(__name__)
@@ -70,14 +70,14 @@ def _worker(
                         for row in batch:
                             out_queue.put((row, b"", f"error: {e}"))
                             emitted += 1
-                        break
-                    try:
-                        client.quit()
-                    except Exception:
-                        client.close()
+                    # The stream may be out of step (a late or half reply):
+                    # never read this connection again, not even for QUIT.
+                    client.close()
                     client = _make_client(conn_kwargs)
                     client.connect()
                     client.group(group)
+                    if retries == 0:
+                        break
     except Exception as e:
         logger.error("worker %s fatal: %s", worker_id, e)
         for row in rows[emitted:]:
@@ -173,10 +173,10 @@ def fetch_articles_parallel(
         if content:
             fetched_ok += 1
             bytes_ok += len(content)
-        elif isinstance(resp, str) and resp.startswith("error:"):
-            errors += 1
-        else:
+        elif is_missing_article(resp):
             missing += 1
+        else:  # "error: ..." from the worker, or a status such as 480/502
+            errors += 1
 
         now = time.monotonic()
         if processed % progress_every == 0 or (now - last_log) >= 5.0:

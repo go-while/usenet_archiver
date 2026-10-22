@@ -149,6 +149,21 @@ Short and long forms are interchangeable (e.g. `-s` / `--server`, `-u` / `--user
 
 See `usenet-archiver -c COMMAND --help` for per-command details.
 
+### Exit codes and completed jobs
+
+A job is written to `completed_newsgroups.log` only when every article the overview listed was
+fetched or answered 423/430 (no such article). Any other answer (480 authentication required,
+502 access denied, 503, a timeout, a cut connection) counts as an error, and a failed OVER/XOVER
+fails the job; it is then not recorded, so a later run fetches what is missing.
+
+| Exit | Meaning |
+|------|---------|
+| 0 | every group complete |
+| 1 | at least one group failed or is incomplete (see the log) |
+| 2 | usage or configuration error (e.g. no server) |
+| 3 | connection failed |
+| 4 | NNTP error, or terminated by a signal |
+
 ### Example
 
 ```bash
@@ -172,6 +187,20 @@ usenet-archiver -c pull \
 | `keep_headers` | Keep listed headers; clear body |
 | `debug` | Print call args |
 
+### mbox format
+
+Each article is stored as mboxrd, the way [mbox2nntp](https://github.com/go-while/mbox2nntp)
+imports it (its `internal/mboxout` is the reference):
+
+- an RFC 4155 envelope line, `From <sender> Thu Dec  8 12:55:04 2016`, in UTC from the
+  article's Date (`Thu Jan  1 00:00:00 1970` when Date is missing or out of range);
+- the article's header lines, then `X-Mbox2nntp-Format: mboxrd` as the last one;
+- an empty line and the body. A line that starts with `From ` or `#! rnews ` after any number
+  of `>` gets one more `>`; mbox2nntp takes one off again and drops the field before sending;
+- one empty line before the next envelope.
+
+Nothing else changes: bytes are kept as they are, including 8-bit text and a CR inside a line.
+
 ### Tests
 
 ```bash
@@ -179,6 +208,23 @@ make test
 # or
 python3 -m unittest discover -s tests -v
 ```
+
+End-to-end tests (`e2e/`, Go 1.27+): a fake NNTP server from
+[nntp-testkit](https://github.com/go-while/nntp-testkit) serves a group, the CLI pulls it, and
+[go-lib-mbox2nntp](https://github.com/go-while/go-lib-mbox2nntp), the parser
+[mbox2nntp](https://github.com/go-while/mbox2nntp) imports with, reads the mbox back. Every article
+must come back byte-identical and exactly once, and a pull that did not get every article must not
+be recorded as completed or exit 0.
+
+```bash
+make e2e
+# or
+cd e2e && go test -v ./...
+```
+
+Tests for bugs that are not fixed yet are reported as skipped, with the number of the review
+finding; when such a test starts to pass it fails, so the mark is removed together with the fix.
+CI (`.github/workflows/test.yml`) runs both suites on every push.
 
 ### Responsible use
 
