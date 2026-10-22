@@ -36,7 +36,6 @@ def article(n: int, body: bytes = b"body") -> bytes:
 class TestPartialTail(unittest.TestCase):
     """1.8: half an article at the end of the mbox (kill, crash, power loss)."""
 
-    @unittest.expectedFailure  # review finding 1.8, not fixed yet
     def test_partial_last_message_is_dropped(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "g.mbox")
@@ -57,10 +56,84 @@ class TestPartialTail(unittest.TestCase):
             self.assertEqual(data, whole + third)
 
 
+class TestJournal(unittest.TestCase):
+    """The journal of a run that never closed its mbox (killed, crashed)."""
+
+    def test_killed_mid_message_then_rerun(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "g.mbox")
+            code = textwrap.dedent(
+                f"""
+                import os, sys
+                sys.path.insert(0, {_ROOT!r})
+                from usenet_archiver import mboxout
+                w = mboxout.MboxWriter({path!r}, flush_every=2)
+                w.open()
+                for n in (1, 2, 3):
+                    w.write(b"Message-ID: <%d@x>\\n\\nbody %d" % (n, n))
+                real = os.write
+                def half_then_die(fd, data):
+                    real(fd, bytes(data[: len(data) // 2]))
+                    os._exit(9)  # killed in the middle of message 4
+                os.write = half_then_die
+                w.write(b"Message-ID: <4@x>\\n\\nbody 4")
+                """
+            )
+            subprocess.run([sys.executable, "-c", code], timeout=30, check=False)
+            self.assertTrue(os.path.exists(path + ".inprogress"))
+
+            w = MboxWriter(path)
+            # 1 and 2 were fsynced; 3 was written but not committed, 4 is half
+            self.assertTrue(w.has_message_id("<2@x>"))
+            self.assertFalse(w.has_message_id("<3@x>"))
+            self.assertFalse(w.has_message_id("<4@x>"))
+            with w:
+                for n in (3, 4):
+                    self.assertTrue(w.write(b"Message-ID: <%d@x>\n\nbody %d" % (n, n)))
+            self.assertFalse(os.path.exists(path + ".inprogress"))
+            with open(path, "rb") as fh:
+                data = fh.read()
+            for n in (1, 2, 3, 4):
+                self.assertEqual(data.count(b"Message-ID: <%d@x>\n" % n), 1, n)
+            self.assertEqual(data.count(b"\nFrom "), 3)
+            self.assertTrue(data.endswith(b"body 4\n\n"))
+
+    def test_disk_full_mid_message_cut_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "g.mbox")
+            with MboxWriter(path) as w:
+                w.write(article(1))
+                size = os.path.getsize(path)
+                real = os.write
+
+                def half_then_full(fd, data):
+                    real(fd, bytes(data[: len(data) // 2]))
+                    raise OSError(28, "No space left on device")
+
+                with mock.patch("os.write", side_effect=half_then_full):
+                    with self.assertRaises(OSError):
+                        w.write(article(2))
+                self.assertEqual(os.path.getsize(path), size)
+                self.assertTrue(w.write(article(3)))
+            self.assertEqual(index_message_ids(path), {"<1@x>", "<3@x>"})
+
+    def test_foreign_mbox_ending_in_one_newline_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "g.mbox")
+            foreign = b"From x@y Thu Dec  8 12:55:04 2016\nMessage-ID: <f@x>\n\nlast line\n"
+            with open(path, "wb") as fh:
+                fh.write(foreign)
+            with MboxWriter(path) as w:
+                w.write(article(1))
+            with open(path, "rb") as fh:
+                data = fh.read()
+            self.assertTrue(data.startswith(foreign + b"\nFrom "))
+            self.assertEqual(index_message_ids(path), {"<f@x>", "<1@x>"})
+
+
 class TestLock(unittest.TestCase):
     """1.9: a second writer on the same mbox is refused, not interleaved."""
 
-    @unittest.expectedFailure  # review finding 1.9, not fixed yet
     def test_second_writer_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "g.mbox")
@@ -74,7 +147,6 @@ class TestLock(unittest.TestCase):
 class TestSigterm(unittest.TestCase):
     """3.1: SIGTERM while the main thread is inside MboxWriter.write."""
 
-    @unittest.expectedFailure  # review finding 3.1, not fixed yet
     def test_sigterm_during_write_exits_with_whole_messages(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "g.mbox")
@@ -107,13 +179,12 @@ class TestSigterm(unittest.TestCase):
                 self.fail("hung after SIGTERM during a write")
             data = open(path, "rb").read()
             self.assertTrue(data.endswith(b"\n\n"), data[-60:])
-            self.assertIn(b"<1@x>", index_message_ids(path))
+            self.assertEqual(index_message_ids(path), {"<1@x>"})  # 2 was never written
 
 
 class TestCompletedAfterFlush(unittest.TestCase):
     """4.1: the job is recorded only after the mbox is closed without error."""
 
-    @unittest.expectedFailure  # review finding 4.1, not fixed yet
     def test_failed_close_is_not_completed(self):
         from test_nntp import FakeNNTPServer
         from usenet_archiver.nntp import NNTPClient

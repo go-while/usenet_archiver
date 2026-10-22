@@ -204,6 +204,24 @@ imports it (its `internal/mboxout` is the reference):
 
 Nothing else changes: bytes are kept as they are, including 8-bit text and a CR inside a line.
 
+Articles over 1 MiB, or with a line over 1 MiB, are not written (see "Exit codes" below).
+
+### Crash safety
+
+- Each message is appended with one `write()`; if that fails half way (disk full, Ctrl-C), the
+  file is cut back to the last whole message.
+- While a pull writes an mbox, `<mbox>.inprogress` holds the size of the messages already on disk
+  (fsynced every 100 messages). A clean finish fsyncs the mbox and removes it. After a crash,
+  kill or power loss the next run cuts the mbox back to that size before it reads the
+  Message-IDs, so a half-written article is neither kept nor taken for present; the articles
+  after it are fetched again.
+- An mbox without that file that does not end in a line end was cut too, and loses its last
+  partial message. One that ends in a single line end is left alone (other mbox writers end
+  that way).
+- A second process writing the same mbox is refused (`flock`), and the group fails for it.
+- SIGTERM finishes the article being written, stops the pull, closes the mbox and exits 4.
+- A job is recorded in `completed_newsgroups.log` only after its mbox has been fsynced and closed.
+
 ### Tests
 
 ```bash

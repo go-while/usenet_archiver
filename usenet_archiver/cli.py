@@ -33,15 +33,17 @@ class TerminatedBySignal(Exception):
 
 
 def _handle_sigterm(signum, frame):
+    """Stop the pull. Never touches the writer: the handler runs in the main
+    thread, which may be inside MboxWriter.write holding its lock (closing it
+    from here deadlocked). In the middle of os.write the stop is left to the
+    fetch loop, which sees the stop event; anywhere else it is raised now.
+    pull_group's cleanup closes the writer, which keeps whole messages only."""
     global _TERMINATED
     _TERMINATED = True
     if _STOP_EVENT is not None:
         _STOP_EVENT.set()
-    if _ACTIVE_WRITER is not None:
-        try:
-            _ACTIVE_WRITER.close()
-        except Exception:
-            pass
+    if _ACTIVE_WRITER is not None and _ACTIVE_WRITER.writing:
+        return
     raise TerminatedBySignal("terminated by signal")
 
 
@@ -185,6 +187,8 @@ def mark_completed(completed_log: str, mbox_filename: str, logger: logging.Logge
     try:
         with open(completed_log, "a", encoding="utf-8") as fh:
             fh.write(f"{mbox_filename}\n")
+            fh.flush()
+            os.fsync(fh.fileno())
         logger.info("Recorded successful pull of %s in %s", mbox_filename, completed_log)
     except OSError as e:
         logger.error("Failed to update %s: %s", completed_log, e)
@@ -369,7 +373,8 @@ def pull_group(
                 completed_log,
             )
             raise TerminatedBySignal("terminated")
-        if articles_errors > 0 or attempted < rows_to_fetch:
+        clean = not (articles_errors > 0 or attempted < rows_to_fetch)
+        if not clean:
             logger.warning(
                 "Pull of %s did not finish cleanly "
                 "(errors=%s attempted=%s/%s); not adding to %s",
@@ -379,12 +384,21 @@ def pull_group(
                 rows_to_fetch,
                 completed_log,
             )
-            return False
-        mark_completed(completed_log, mbox_filename, logger)
-        return True
-    finally:
-        writer.close()
+    except BaseException:
         _ACTIVE_WRITER = None
+        try:
+            writer.close()
+        except Exception as close_err:
+            logger.error("Closing %s failed: %s", mbox_filename, close_err)
+        raise
+    _ACTIVE_WRITER = None
+    # The articles must be on disk before the job is recorded: close() fsyncs,
+    # and raises when they could not be written.
+    writer.close()
+    if not clean:
+        return False
+    mark_completed(completed_log, mbox_filename, logger)
+    return True
 
 
 def cmd_list_groups(client: NNTPClient, wildmat: Optional[str]) -> int:

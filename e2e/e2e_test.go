@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -673,4 +674,93 @@ func TestArticleOverLimit(t *testing.T) {
 	if r.exit != 0 || !r.completed || !strings.Contains(r.output, "too-big=1") {
 		t.Errorf("exit %d completed %v\n%s", r.exit, r.completed, r.output)
 	}
+}
+
+// pullSignalled runs the CLI like pull and sends it sig after the given
+// time; it returns the result once the CLI has exited (killed after 30 s).
+func pullSignalled(t T, addr, dir string, after time.Duration, sig os.Signal) pullResult {
+	t.Helper()
+	args := []string{"-m", "usenet_archiver", "-c", "pull", "-s", addr, "--no-ssl", "--no-netrc",
+		"-g", group, "-C", "2", "-D", "4", "-t", "2"}
+	cmd := exec.Command("python3", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+uaSrc(t), "NNTPSERVER=", "NNTP_PASSWORD=")
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting the CLI: %v", err)
+	}
+	timer := time.AfterFunc(after, func() { cmd.Process.Signal(sig) })
+	defer timer.Stop()
+	hard := time.AfterFunc(after+30*time.Second, func() { cmd.Process.Kill() })
+	defer hard.Stop()
+	err := cmd.Wait()
+	r := pullResult{dir: dir, mbox: filepath.Join(dir, group+".mbox"), output: out.String()}
+	if ee, ok := err.(*exec.ExitError); ok {
+		r.exit = ee.ExitCode()
+		if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL && sig != os.Kill {
+			r.hung = true
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "completed_newsgroups.log")); err == nil {
+		r.completed = strings.Contains(string(b), group)
+	}
+	return r
+}
+
+// manyArticles serves n articles, each reply 3 ms late, so a pull takes
+// a few seconds and a signal arrives in the middle of it.
+func manyArticles(t *testing.T, n int) (*fakeserver.Server, []fakeserver.Article) {
+	var arts []fakeserver.Article
+	for i := 1; i <= n; i++ {
+		arts = append(arts, art(fmt.Sprintf("<%d@many>", i), fmt.Sprintf("article %d", i), strings.Repeat("text ", 40), "end"))
+	}
+	srv, _ := newServer(t, arts, fakeserver.Faults{Delay: map[string]time.Duration{"ARTICLE": 3 * time.Millisecond}})
+	return srv, arts
+}
+
+// TestKilledPullThenRerun: a pull killed with SIGKILL (no cleanup at all)
+// leaves whatever it leaves; the next run must end with every article
+// exactly once and byte-identical. A regression guard: since each message
+// is one write() call, SIGKILL alone no longer cuts one; the cut cases
+// (power loss, disk full, a signal inside the write) are unit tests in
+// tests/test_write_safety.py.
+func TestKilledPullThenRerun(t *testing.T) {
+	srv, arts := manyArticles(t, 1500)
+	dir := t.TempDir()
+	killed := pullSignalled(t, srv.Addr(), dir, 1500*time.Millisecond, os.Kill)
+	if killed.completed {
+		t.Fatalf("finished before the kill; make the pull slower")
+	}
+	r := pull(t, srv.Addr(), dir)
+	if r.exit != 0 || !r.completed {
+		t.Errorf("rerun: exit %d completed %v\n%s", r.exit, r.completed, r.output)
+	}
+	expectAll(t, r.mbox, arts)
+}
+
+// TestSigtermMidPull: SIGTERM stops the pull by itself, promptly, with exit
+// code 4, whole articles only and the mbox closed (no journal left); the job
+// is not recorded. A rerun then completes it. A regression guard: the old
+// deadlock needed the signal inside MboxWriter.write, which a timed signal
+// rarely hits; tests/test_write_safety.py delivers it there.
+func TestSigtermMidPull(t *testing.T) {
+	srv, arts := manyArticles(t, 1500)
+	dir := t.TempDir()
+	r := pullSignalled(t, srv.Addr(), dir, 1500*time.Millisecond, syscall.SIGTERM)
+	if r.hung {
+		t.Fatalf("did not exit within 30 s of SIGTERM\n%s", r.output)
+	}
+	if r.exit != 4 || r.completed {
+		t.Errorf("after SIGTERM: exit %d (want 4) completed %v\n%s", r.exit, r.completed, r.output)
+	}
+	if _, err := os.Stat(r.mbox + ".inprogress"); err == nil {
+		t.Errorf("journal left behind: the mbox was not closed")
+	}
+	onlyWholeArticles(t, r.mbox, arts)
+	r2 := pull(t, srv.Addr(), dir)
+	if r2.exit != 0 || !r2.completed {
+		t.Errorf("rerun: exit %d completed %v", r2.exit, r2.completed)
+	}
+	expectAll(t, r2.mbox, arts)
 }
