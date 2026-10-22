@@ -70,14 +70,14 @@ def _worker(
                         for row in batch:
                             out_queue.put((row, b"", f"error: {e}"))
                             emitted += 1
-                        break
-                    try:
-                        client.quit()
-                    except Exception:
-                        client.close()
+                    # The stream may be out of step (a late or half reply):
+                    # never read this connection again, not even for QUIT.
+                    client.close()
                     client = _make_client(conn_kwargs)
                     client.connect()
                     client.group(group)
+                    if retries == 0:
+                        break
     except Exception as e:
         logger.error("worker %s fatal: %s", worker_id, e)
         for row in rows[emitted:]:

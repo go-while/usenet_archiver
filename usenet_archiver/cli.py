@@ -813,6 +813,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             except Exception as e:
                 logger.error("Failed group %s: %s", group, e)
                 incomplete += 1
+                # The failure may have left the connection out of step: the
+                # next group gets a new one.
+                try:
+                    client.reconnect()
+                except (NNTPError, OSError) as re_err:
+                    logger.error("Reconnect after %s failed: %s", group, re_err)
             finally:
                 logging.getLogger().removeHandler(file_handler)
                 file_handler.close()

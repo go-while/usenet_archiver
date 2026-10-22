@@ -34,6 +34,22 @@ def is_missing_article(resp: str) -> bool:
     return isinstance(resp, str) and resp.startswith(MISSING_ARTICLE)
 
 
+def _check_in_step(spec, resp: str) -> None:
+    """Raise NNTPError when resp cannot be the answer to ARTICLE spec.
+
+    A status line is three digits and a space; "220 n <id>" must name the
+    article number asked for. Anything else means the stream is out of step
+    (e.g. the late rest of an earlier reply), and reading on would pair
+    replies with the wrong requests.
+    """
+    if len(resp) < 3 or not resp[:3].isdigit() or (len(resp) > 3 and resp[3] != " "):
+        raise NNTPError(f"ARTICLE {spec}: not a status line, stream out of step: {resp[:80]!r}")
+    if isinstance(spec, int) and resp.startswith("220"):
+        parts = resp.split()
+        if len(parts) >= 2 and parts[1].isdigit() and int(parts[1]) != spec:
+            raise NNTPError(f"ARTICLE {spec}: reply is for article {parts[1]}, stream out of step")
+
+
 class NNTPClient:
     def __init__(
         self,
@@ -54,6 +70,7 @@ class NNTPClient:
         self.timeout = timeout
         self.conn: Optional[socket.socket] = None
         self._buf = b""
+        self.current_group: Optional[str] = None  # last group selected with GROUP
         self.capabilities: Dict[str, List[str]] = {}
         self.logger = logging.getLogger(__name__)
         if verbose:
@@ -100,6 +117,19 @@ class NNTPClient:
         except Exception as e:
             self.close()
             raise NNTPError(f"Connection error: {e}") from e
+
+    def reconnect(self) -> None:
+        """Drop the connection and open a new one, selecting the current group again.
+
+        Use it after any error in the middle of a reply: a timeout or a cut
+        leaves the stream out of step, and the next read would take the rest
+        of the old reply for the answer to a new command.
+        """
+        group = self.current_group
+        self.close()
+        self.connect()
+        if group:
+            self.group(group)
 
     def close(self) -> None:
         if self.conn is not None:
@@ -227,6 +257,7 @@ class NNTPClient:
         if len(parts) < 4:
             raise NNTPError(f"Invalid GROUP response: {resp}")
         first, last = int(parts[2]), int(parts[3])
+        self.current_group = newsgroup
         return first, last, resp
 
     def stat(self, article_id: int) -> Tuple[int, str]:
@@ -267,6 +298,7 @@ class NNTPClient:
             resp = self._recv_status()
             if self.verbose:
                 print(f"ARTICLE {spec} response: {resp}")
+            _check_in_step(spec, resp)
             if not resp.startswith("220"):
                 results.append((spec, b"", resp))
                 continue

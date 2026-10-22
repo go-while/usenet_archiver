@@ -106,6 +106,32 @@ def _date_only(dt: Optional[datetime]):
 
 FetchOverview = Callable[[int, int], List[OverviewRow]]
 
+# Tries per overview chunk; the connection is replaced after each failure.
+OVERVIEW_TRIES = 3
+
+
+def fetch_with_reconnect(client, start_id: int, end_id: int, tries: int = OVERVIEW_TRIES) -> List[OverviewRow]:
+    """fetch_overview_chunk, retried on a new connection after any failure.
+
+    After a timeout or a cut the old connection is out of step, so it is never
+    read again: client.reconnect() opens a new one and selects the group. The
+    last failure is raised.
+    """
+    from .nntp import NNTPError, NNTPTimeout
+
+    for attempt in range(1, tries + 1):
+        try:
+            return fetch_overview_chunk(client, start_id, end_id)
+        except (NNTPTimeout, NNTPError, OSError) as e:
+            if attempt == tries:
+                raise
+            logger.warning(
+                "Overview %s-%s failed (%s); reconnecting, try %s of %s",
+                start_id, end_id, e, attempt + 1, tries,
+            )
+            client.reconnect()
+    raise AssertionError("unreachable")
+
 
 def fetch_overview_chunk(client, start_id: int, end_id: int) -> List[OverviewRow]:
     """Fetch overview rows for [start_id, end_id] via OVER/XOVER or XHDR DATE.
@@ -193,7 +219,7 @@ def find_articles_in_date_range(
         return []
 
     def fetch(a: int, b: int) -> List[OverviewRow]:
-        return fetch_overview_chunk(client, a, b)
+        return fetch_with_reconnect(client, a, b)
 
     if start_date is None and end_date is None:
         return list(_scan_chunks(fetch, first, last, chunk_size, None, None))
