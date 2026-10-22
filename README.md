@@ -195,6 +195,14 @@ usenet-archiver -c pull \
 | `keep_headers` | Keep listed headers; clear body |
 | `debug` | Print call args |
 
+A spec is `name`, or `name:` followed by arguments separated by `:`; a header list is one argument,
+comma-separated: `--plugin strip_headers:To,Cc,X-Face`, `--plugin keep_headers:headers=From,Subject,Message-ID`.
+Plugins also apply to `post`.
+
+`pull` refuses a plugin that removes `Message-ID` (exit 2): dedup recognises an article by it, and
+without it different articles can look the same, so all but one would be skipped as duplicates.
+Keep `Message-ID` in a `keep_headers` list, or pull with `--no-dedup`.
+
 ### mbox format
 
 Each article is stored as mboxrd, the way [mbox2nntp](https://github.com/go-while/mbox2nntp)

@@ -13,6 +13,7 @@ header it re-serialised).
 from __future__ import annotations
 
 import functools
+import inspect
 from typing import Any, Callable, List, Optional, Set
 
 class RawArticle:
@@ -174,6 +175,26 @@ def parse_plugin_spec(spec: str) -> Callable[[RawArticle], Optional[RawArticle]]
     return functools.partial(func, *args, **kwargs)
 
 
+def removes_message_id(plugin: Callable) -> bool:
+    """Whether a plugin from parse_plugin_spec removes the Message-ID field.
+
+    A pull recognises an article by its Message-ID (dedup, reruns); without
+    it different articles can look the same, and all but one would be
+    skipped as duplicates.
+    """
+    func = getattr(plugin, "func", plugin)
+    if func not in (strip_headers, keep_headers):
+        return False
+    args = getattr(plugin, "args", ())
+    kwargs = getattr(plugin, "keywords", None) or {}
+    default = inspect.signature(func).parameters["headers"].default
+    headers = args[0] if args else kwargs.get("headers", default)
+    names = {h.strip().lower() for h in str(headers).split(",") if h.strip()}
+    if func is strip_headers:
+        return "message-id" in names
+    return "message-id" not in names
+
+
 def apply_plugins(message: RawArticle, plugins: List[Callable[[RawArticle], Optional[RawArticle]]]) -> Optional[RawArticle]:
     """Run plugins in order; stop and drop if any returns None."""
     for plugin in plugins:
@@ -190,5 +211,6 @@ __all__ = [
     "strip_headers",
     "keep_headers",
     "parse_plugin_spec",
+    "removes_message_id",
     "apply_plugins",
 ]

@@ -164,11 +164,9 @@ class TestPluginsKeepMessageID(unittest.TestCase):
                 data = fh.read()
         return rc, data.count(b"\nX-Mbox2nntp-Format: mboxrd\n")  # messages written
 
-    @unittest.expectedFailure
     def test_keep_headers_without_message_id_refused(self):
         self.assertEqual(self._pull("keep_headers:From,Subject"), (2, 0))
 
-    @unittest.expectedFailure
     def test_strip_message_id_refused(self):
         self.assertEqual(self._pull("strip_headers:Message-ID,Date"), (2, 0))
         self.assertEqual(self._pull("strip_headers:headers=message-id"), (2, 0))
@@ -177,7 +175,6 @@ class TestPluginsKeepMessageID(unittest.TestCase):
         self.assertEqual(self._pull("keep_headers:From,Subject,Message-ID"), (0, 3))
         self.assertEqual(self._pull("strip_headers:From,Subject"), (0, 3))
 
-    @unittest.expectedFailure
     def test_removes_message_id(self):
         from usenet_archiver.plugins import removes_message_id
 

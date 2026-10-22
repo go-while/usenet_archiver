@@ -18,7 +18,7 @@ from .fetch import fetch_articles_parallel
 from .mboxout import MboxWriter
 from .nntp import DEFAULT_RESPONSE_TIMEOUT, MAX_ARTICLE, NNTPClient, NNTPError, is_missing_article, is_too_big
 from .overview import find_articles_in_date_range
-from .plugins import RawArticle, apply_plugins, parse_plugin_spec
+from .plugins import RawArticle, apply_plugins, parse_plugin_spec, removes_message_id
 
 # Global so SIGTERM can close an open writer / stop workers.
 _ACTIVE_WRITER: Optional[MboxWriter] = None
@@ -844,6 +844,14 @@ def _main(argv: Optional[List[str]]) -> int:
             )
 
         plugins = _parse_plugins(args.plugin, parser)
+        if args.dedup:
+            for spec, plugin in zip(args.plugin, plugins):
+                if removes_message_id(plugin):
+                    parser.error(
+                        f"--plugin {spec} removes Message-ID, by which the archive recognises "
+                        "an article: different articles would be skipped as duplicates. "
+                        "Keep Message-ID, or pull with --no-dedup"
+                    )
         group_specs = collect_group_specs(args.newsgroups, args.groups_file)
         group_specs = filter_binary_groups(group_specs, logger=logger)
         if not group_specs:
