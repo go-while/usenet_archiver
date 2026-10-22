@@ -4,15 +4,12 @@
 from __future__ import annotations
 
 import argparse
-import email
 import logging
 import os
 import signal
 import sys
 import threading
 from datetime import datetime, timezone
-from email.generator import BytesGenerator
-from io import BytesIO
 from typing import Callable, List, Optional, Tuple
 
 from .creds import resolve_credentials
@@ -20,7 +17,7 @@ from .fetch import fetch_articles_parallel
 from .mboxout import MboxWriter
 from .nntp import DEFAULT_RESPONSE_TIMEOUT, MAX_ARTICLE, NNTPClient, NNTPError, is_missing_article, is_too_big
 from .overview import find_articles_in_date_range
-from .plugins import apply_plugins, parse_plugin_spec
+from .plugins import RawArticle, apply_plugins, parse_plugin_spec
 
 # Global so SIGTERM can close an open writer / stop workers.
 _ACTIVE_WRITER: Optional[MboxWriter] = None
@@ -176,12 +173,6 @@ def normalize_message_id(mid: str) -> str:
     return mid
 
 
-def message_to_bytes(msg) -> bytes:
-    buf = BytesIO()
-    BytesGenerator(buf, mangle_from_=False).flatten(msg)
-    return buf.getvalue()
-
-
 def mark_completed(completed_log: str, mbox_filename: str, logger: logging.Logger) -> None:
     """Append ``mbox_filename`` to the completed-jobs log after a successful pull."""
     try:
@@ -321,12 +312,11 @@ def pull_group(
                 return
             body = content
             if plugins:
-                msg = email.message_from_bytes(content)
-                msg = apply_plugins(msg, plugins)
+                msg = apply_plugins(RawArticle(content), plugins)
                 if msg is None:
                     articles_skipped += 1
                     return
-                body = message_to_bytes(msg)
+                body = msg.to_bytes()
             if writer.write(body, dt=row.date, message_id=row.message_id or None):
                 articles_saved += 1
             else:
@@ -425,15 +415,15 @@ def cmd_post(client: NNTPClient, newsgroups: List[str], plugins: list) -> int:
     if not raw.strip():
         sys.stderr.write("No message on stdin\n")
         return 4
-    msg = email.message_from_bytes(raw)
+    msg = RawArticle(raw)
     if "Newsgroups" not in msg and newsgroups:
-        msg["Newsgroups"] = ",".join(newsgroups)
+        msg.add("Newsgroups", ",".join(newsgroups))
     if plugins:
         msg = apply_plugins(msg, plugins)
         if msg is None:
             sys.stderr.write("Message dropped by plugin\n")
             return 4
-    payload = message_to_bytes(msg)
+    payload = msg.to_bytes()
     resp = client.post(payload)
     sys.stderr.write(f"{resp}\n")
     return 0

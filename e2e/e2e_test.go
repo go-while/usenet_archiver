@@ -764,3 +764,16 @@ func TestSigtermMidPull(t *testing.T) {
 	}
 	expectAll(t, r2.mbox, arts)
 }
+
+// TestPluginChangesOnlyItsField: --plugin strip_headers:Cc removes the Cc
+// field and changes nothing else: a long field is not refolded and 8-bit
+// text is not re-encoded (the email package did both).
+func TestPluginChangesOnlyItsField(t *testing.T) {
+	a := art("<plug@x>", "body caf\xe9")
+	a.Headers = append(a.Headers, "X-Long: "+strings.Repeat("word ", 30), "Cc: c@x.example,", "  d@x.example", "X-8bit: caf\xe9 au lait")
+	srv, _ := newServer(t, []fakeserver.Article{a}, fakeserver.Faults{})
+	r := pull(t, srv.Addr(), "", "--plugin", "strip_headers:Cc")
+	want := a
+	want.Headers = append(append([]string{}, a.Headers[:7]...), a.Headers[9])
+	expectAll(t, r.mbox, []fakeserver.Article{want})
+}
