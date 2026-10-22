@@ -590,7 +590,6 @@ class TestLimits(unittest.TestCase):
 class TestWorkers(unittest.TestCase):
     """Review findings 5.5 (leaked workers) and 5.6 (one connection too many)."""
 
-    @unittest.expectedFailure  # review finding 5.5, not fixed yet
     def test_error_in_on_article_leaves_no_workers(self):
         from usenet_archiver.fetch import fetch_articles_parallel
         from usenet_archiver.overview import OverviewRow
@@ -620,7 +619,6 @@ class TestWorkers(unittest.TestCase):
         self.assertEqual([t.name for t in threading.enumerate() if t.name.startswith("nntp-fetch-")], [])
         self.assertEqual(srv.open_conns, 0)
 
-    @unittest.expectedFailure  # review finding 5.6, not fixed yet
     def test_pull_uses_at_most_C_connections(self):
         import logging
         import tempfile

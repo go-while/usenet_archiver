@@ -238,6 +238,8 @@ def pull_group(
         except OSError as e:
             logger.warning("Could not read %s: %s", completed_log, e)
 
+    if client.conn is None:  # closed for the fetch of the group before
+        client.connect()
     first, last, group_resp = client.group(group)
     logger.info("GROUP %s: %s (first=%s last=%s)", group, group_resp, first, last)
     if first == 0 and last == 0:
@@ -329,6 +331,10 @@ def pull_group(
 
         stop = _STOP_EVENT if _STOP_EVENT is not None else threading.Event()
         rows_to_fetch = len(rows)
+        # The fetch opens `connections` connections of its own: close this
+        # one meanwhile, so that no more than that are open (providers
+        # limit them). The next group connects again.
+        client.quit()
         _fetched_ok, _missing, _errors, elapsed = fetch_articles_parallel(
             rows=rows,
             group=group,
