@@ -362,43 +362,49 @@ func TestCleanPull(t *testing.T) {
 // TestRerunAddsNothing: pulling the same group three times into one mbox must
 // leave one copy of each article.
 func TestRerunAddsNothing(t *testing.T) {
-	cases := map[string]struct {
-		a       fakeserver.Article
-		finding string
-	}{
-		"plain":      {art("<plain@x>", "x"), ""},
-		"latin-1 id": {art("<caf\xe9@x>", "Latin-1 Message-ID"), ""},
-		"utf-8 id":   {art("<caf\xc3\xa9@x>", "UTF-8 Message-ID"), "2.1"},
-		"folded id": {func() fakeserver.Article {
-			a := art("<folded@x>", "folded")
-			a.Headers[5] = "Message-ID:"
-			a.Headers = append(a.Headers, " <folded@x>")
-			return a
-		}(), "2.1"},
-		"no id": {fakeserver.Article{Headers: []string{"From: a@b.example", "Newsgroups: " + group, "Subject: no Message-ID", "Date: Thu, 08 Dec 2016 12:55:04 +0000"}, Body: []string{"no id"}}, "2.1"},
+	folded := art("<folded@x>", "folded")
+	folded.Headers[5] = "Message-ID:"
+	folded.Headers = append(folded.Headers, " <folded@x>")
+	cases := map[string]fakeserver.Article{
+		"plain":      art("<plain@x>", "x"),
+		"latin-1 id": art("<caf\xe9@x>", "Latin-1 Message-ID"),
+		"utf-8 id":   art("<caf\xc3\xa9@x>", "UTF-8 Message-ID"),
+		"folded id":  folded,
+		"no id": {Headers: []string{"From: a@b.example", "Newsgroups: " + group, "Subject: no Message-ID",
+			"Date: Thu, 08 Dec 2016 12:55:04 +0000"}, Body: []string{"no id"}},
 	}
-	for name, c := range cases {
-		c := c
+	for name, a := range cases {
+		a := a
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			// served raw: the Store would add a Message-ID to "no id"
-			srv := fakeserver.New(t, fakeserver.Options{Handler: rawHandler([]fakeserver.Article{c.a})})
-			check := func(t T) {
-				dir := t.TempDir()
-				for run := 0; run < 3; run++ {
-					pull(t, srv.Addr(), dir)
-				}
-				got, _ := readMbox(t, filepath.Join(dir, group+".mbox"))
-				if len(got) != 1 {
-					t.Errorf("%d copies after 3 runs", len(got))
-				}
+			srv := fakeserver.New(t, fakeserver.Options{Handler: rawHandler([]fakeserver.Article{a})})
+			dir := t.TempDir()
+			for run := 0; run < 3; run++ {
+				pull(t, srv.Addr(), dir)
 			}
-			if c.finding != "" {
-				knownBug(t, c.finding, check)
-			} else {
-				check(t)
+			got, _ := readMbox(t, filepath.Join(dir, group+".mbox"))
+			if len(got) != 1 {
+				t.Errorf("%d copies after 3 runs", len(got))
 			}
 		})
+	}
+}
+
+// TestEmptyMessageIDIsNotAnID: two different articles whose Message-ID
+// field is empty, followed by the same Subject line, are both stored (the
+// next header line used to be taken for the ID, so the second was a "dup").
+func TestEmptyMessageIDIsNotAnID(t *testing.T) {
+	mk := func(from, body string) fakeserver.Article {
+		return fakeserver.Article{Headers: []string{"From: " + from, "Newsgroups: " + group, "Message-ID:",
+			"Subject: Re: help", "Date: Thu, 08 Dec 2016 12:55:04 +0000"}, Body: []string{body}}
+	}
+	srv := fakeserver.New(t, fakeserver.Options{Handler: rawHandler([]fakeserver.Article{
+		mk("a@b.example", "first article"), mk("c@d.example", "a different article")})})
+	r := pull(t, srv.Addr(), "")
+	got, _ := readMbox(t, r.mbox)
+	if len(got) != 2 {
+		t.Errorf("%d messages in the mbox, want 2", len(got))
 	}
 }
 
@@ -410,14 +416,12 @@ func TestQuotedMessageIDDoesNotHideArticle(t *testing.T) {
 	st.AddGroup(group, "")
 	st.AddArticle(group, quoting)
 	srv := fakeserver.New(t, fakeserver.Options{Store: st})
-	knownBug(t, "1.7", func(t T) {
-		dir := t.TempDir()
-		pull(t, srv.Addr(), dir)
-		later := art("<quoted@x>", "the article the other one quoted")
-		st.AddArticle(group, later)
-		pull(t, srv.Addr(), dir)
-		expectAll(t, filepath.Join(dir, group+".mbox"), []fakeserver.Article{quoting, later})
-	})
+	dir := t.TempDir()
+	pull(t, srv.Addr(), dir)
+	later := art("<quoted@x>", "the article the other one quoted")
+	st.AddArticle(group, later)
+	pull(t, srv.Addr(), dir)
+	expectAll(t, filepath.Join(dir, group+".mbox"), []fakeserver.Article{quoting, later})
 }
 
 // TestDateWindowAcrossGap: a hole in the article numbers must not cut off the

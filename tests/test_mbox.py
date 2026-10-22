@@ -152,5 +152,69 @@ class TestWriteMessage(unittest.TestCase):
             self.assertTrue(data.startswith(b"From "))
 
 
+class TestMessageIDKeys(unittest.TestCase):
+    """One extractor for header, OVER and index: findings 1.7, 1.11, 2.1."""
+
+    def test_header_value(self):
+        from usenet_archiver.mboxout import header_value
+
+        head = [b"Subject: s", b"MESSAGE-ID:", b"  <folded@x>", b"Message-ID: <second@x>"]
+        self.assertEqual(header_value(head, b"message-id"), b"<folded@x>")
+        self.assertEqual(header_value([b"Message-Id:   <a@b>  "], b"message-id"), b"<a@b>")
+        # an empty field must not take the next header line
+        self.assertIsNone(header_value([b"Message-ID:", b"Subject: Re: help"], b"message-id"))
+        self.assertIsNone(header_value([b"X-Message-ID: <x@y>"], b"message-id"))
+
+    def test_over_and_header_give_the_same_key(self):
+        from usenet_archiver.mboxout import message_id_from_article
+        from usenet_archiver.overview import parse_overview_line
+
+        for mid in (b"<caf\xc3\xa9@x>", b"<caf\xe9@x>", b"<a b@x>"):
+            row = parse_overview_line(b"5\ts\tf\tThu, 08 Dec 2016 12:55:04 +0000\t" + mid + b"\t\t1\t1")
+            art = b"Message-ID: " + mid + b"\n\nbody"
+            self.assertEqual(row.message_id, message_id_from_article(art), mid)
+
+    def _rerun(self, articles, runs=3):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.mbox")
+            for _ in range(runs):
+                with MboxWriter(path) as w:
+                    for a in articles:
+                        w.write(a)
+            with open(path, "rb") as fh:
+                return index_message_ids(path), fh.read()
+
+    def test_rerun_writes_each_article_once(self):
+        arts = [
+            b"Subject: folded\nMessage-ID:\n <folded@x>\n\nb",
+            b"Subject: utf8\nMessage-ID: <caf\xc3\xa9@x>\n\nb",
+            b"Subject: no id\nDate: Thu, 08 Dec 2016 12:55:04 +0000\n\nb",
+            b"Subject: crlf\r\nMessage-ID: <crlf@x>\r\n\r\nb\r\n",
+        ]
+        _, data = self._rerun(arts)
+        self.assertEqual(data.count(b"\nFrom "), 3)  # 4 envelopes, the first at offset 0
+        self.assertTrue(data.startswith(b"From "))
+
+    def test_quoted_header_in_body_is_not_indexed(self):
+        quoting = b"Message-ID: <quoting@x>\n\n> I saw this header:\nMessage-ID: <quoted@x>\n"
+        keys, _ = self._rerun([quoting], runs=1)
+        self.assertEqual(keys, {"<quoting@x>"})
+
+    def test_empty_message_id_is_not_a_key(self):
+        a = b"From: a@b\nMessage-ID:\nSubject: Re: help\n\nfirst"
+        b = b"From: c@d\nMessage-ID:\nSubject: Re: help\n\nsecond"
+        with tempfile.TemporaryDirectory() as tmp:
+            with MboxWriter(os.path.join(tmp, "t.mbox")) as w:
+                self.assertTrue(w.write(a))
+                self.assertTrue(w.write(b))
+
+    def test_index_of_crlf_mbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.mbox")
+            with open(path, "wb") as fh:
+                fh.write(b"From - Thu Dec  8 12:55:04 2016\r\nMessage-ID:\r\n <c@x>\r\n\r\nbody\r\n\r\n")
+            self.assertEqual(index_message_ids(path), {"<c@x>"})
+
+
 if __name__ == "__main__":
     unittest.main()

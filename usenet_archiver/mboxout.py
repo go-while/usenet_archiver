@@ -3,8 +3,7 @@
 
 from __future__ import annotations
 
-import email
-import re
+import hashlib
 import threading
 from datetime import datetime, timezone
 from email.utils import parseaddr, parsedate_to_datetime
@@ -28,9 +27,6 @@ _MONTHS = (
     "Dec",
 )
 
-_MESSAGE_ID_RE = re.compile(rb"(?im)^Message-ID:\s*(.+?)\s*$")
-_FROM_RE = re.compile(rb"(?im)^From:\s*(.+?)\s*$")
-_DATE_RE = re.compile(rb"(?im)^Date:\s*(.+?)\s*$")
 
 
 # The last header line of every article this writer stores. mbox2nntp
@@ -125,52 +121,78 @@ def format_mbox_message(article: bytes, dt: Optional[datetime] = None, from_addr
     return b"".join(out)
 
 
-def _header_block(article: bytes) -> bytes:
-    """Return bytes up to the first blank line (header section)."""
-    for sep in (b"\r\n\r\n", b"\n\n"):
-        idx = article.find(sep)
-        if idx >= 0:
-            return article[:idx]
-    return article[:4096]
+def header_value(head: List[bytes], name: bytes) -> Optional[bytes]:
+    """The value of the first header field called name (any case), unfolded.
+
+    Continuation lines are joined and every run of whitespace becomes one
+    space. An empty value gives None: the next line is never taken for it.
+    """
+    want = name.lower()
+    for i, line in enumerate(head):
+        field, sep, value = line.partition(b":")
+        if not sep or field.strip().lower() != want or line[:1] in (b" ", b"\t"):
+            continue
+        for cont in head[i + 1 :]:
+            if cont[:1] not in (b" ", b"\t"):
+                break
+            value += b" " + cont
+        value = b" ".join(value.split())
+        return value or None
+    return None
+
+
+def msgid_key(raw) -> str:
+    """The dedup key for a Message-ID (bytes from a header or OVER, or str).
+
+    Whitespace is collapsed and the bytes are decoded losslessly
+    (surrogateescape), so the same ID gives the same key from the header,
+    from OVER and from the mbox, whatever its encoding.
+    """
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", errors="surrogateescape")
+    return b" ".join(raw.split()).decode("utf-8", errors="surrogateescape")
+
+
+def _nomid_key(head: List[bytes]) -> str:
+    """Key for an article without a Message-ID: a hash of its header lines."""
+    h = hashlib.sha256()
+    for line in head:
+        h.update(line.rstrip(b"\r") + b"\n")
+    return "no-message-id:" + h.hexdigest()
+
+
+def article_key(article: bytes) -> str:
+    """Dedup key of an article: its Message-ID, else a hash of its header."""
+    head, _ = split_article(article)
+    mid = header_value(head, b"message-id")
+    return msgid_key(mid) if mid else _nomid_key(head)
 
 
 def sender_from_article(article: bytes) -> str:
-    """Extract a From_ envelope address from article bytes (header scan)."""
-    m = _FROM_RE.search(_header_block(article))
-    if not m:
+    """Extract a From_ envelope address from the article's From: field."""
+    value = header_value(split_article(article)[0], b"from")
+    if not value:
         return "-"
-    try:
-        raw = m.group(1).decode("utf-8", errors="replace")
-    except Exception:
-        return "-"
-    _, addr = parseaddr(raw)
+    _, addr = parseaddr(value.decode("utf-8", errors="replace"))
     if addr and "@" in addr:
         return addr
     return "-"
 
 
 def date_from_article(article: bytes) -> Optional[datetime]:
-    m = _DATE_RE.search(_header_block(article))
-    if not m:
+    value = header_value(split_article(article)[0], b"date")
+    if not value:
         return None
     try:
-        date_hdr = m.group(1).decode("ascii", errors="replace")
-        return parsedate_to_datetime(date_hdr)
+        return parsedate_to_datetime(value.decode("ascii", errors="replace"))
     except (TypeError, ValueError, OverflowError, UnicodeError):
         return None
 
 
 def message_id_from_article(article: bytes) -> Optional[str]:
-    m = _MESSAGE_ID_RE.search(_header_block(article))
-    if not m:
-        # Fallback to full parse for folded headers
-        msg = email.message_from_bytes(article)
-        mid = msg.get("Message-ID") or msg.get("Message-Id")
-        return mid.strip() if mid else None
-    try:
-        return m.group(1).decode("ascii", errors="replace").strip()
-    except Exception:
-        return None
+    """The article's Message-ID as a dedup key (see msgid_key), or None."""
+    mid = header_value(split_article(article)[0], b"message-id")
+    return msgid_key(mid) if mid else None
 
 
 def write_mbox_message(handle: BinaryIO, article: bytes, dt: Optional[datetime] = None) -> None:
@@ -181,20 +203,41 @@ def write_mbox_message(handle: BinaryIO, article: bytes, dt: Optional[datetime] 
 
 
 def index_message_ids(mbox_path: str) -> Set[str]:
-    """Scan an existing mbox for Message-ID headers (byte scan, no full parse)."""
-    ids: Set[str] = set()
+    """Dedup keys (see article_key) of every message in an existing mbox.
+
+    Only header blocks are read: an envelope line ("From " at the start of
+    the file or after an empty line) up to the next empty line. A body line
+    such as a quoted "Message-ID: <x>" is never taken for a header. Header
+    lines are unquoted and this writer's FORMAT_FIELD is left out, so the
+    keys equal those of the articles as fetched. LF and CRLF files work.
+    """
+    keys: Set[str] = set()
+    head: Optional[List[bytes]] = None  # header lines of the current message
+    prev_empty = True
     try:
         with open(mbox_path, "rb") as fh:
-            for line in fh:
-                m = _MESSAGE_ID_RE.match(line.rstrip(b"\r\n"))
-                if m:
-                    try:
-                        ids.add(m.group(1).decode("ascii", errors="replace").strip())
-                    except Exception:
-                        pass
+            for raw in fh:
+                line = raw.rstrip(b"\r\n")
+                if head is not None:
+                    if line == b"":
+                        keys.add(_key_from_head(head))
+                        head = None
+                    else:
+                        head.append(line)
+                elif prev_empty and line.startswith(b"From "):
+                    head = []
+                prev_empty = line == b""
+            if head:
+                keys.add(_key_from_head(head))
     except FileNotFoundError:
         pass
-    return ids
+    return keys
+
+
+def _key_from_head(head: List[bytes]) -> str:
+    head = [unquote(line) for line in head if line != FORMAT_FIELD]
+    mid = header_value(head, b"message-id")
+    return msgid_key(mid) if mid else _nomid_key(head)
 
 
 class MboxWriter:
@@ -239,16 +282,21 @@ class MboxWriter:
         self.close()
 
     def has_message_id(self, message_id: Optional[str]) -> bool:
-        if not self.dedup or not message_id:
+        if not self.dedup or not message_id or not message_id.strip():
             return False
         with self._lock:
-            return message_id.strip() in self._seen
+            return msgid_key(message_id) in self._seen
 
     def write(self, article: bytes, dt: Optional[datetime] = None, message_id: Optional[str] = None) -> bool:
-        """Write article unless it is a duplicate. Returns True if written."""
-        mid = message_id or message_id_from_article(article)
+        """Write article unless it is a duplicate. Returns True if written.
+
+        The key is the article's own Message-ID header (article_key), the
+        same the index reads back from the mbox; message_id (e.g. from OVER)
+        is not used for it.
+        """
+        mid = article_key(article)
         with self._lock:
-            if mid and self.dedup and mid.strip() in self._seen:
+            if self.dedup and mid in self._seen:
                 self.skipped_dup += 1
                 return False
             if self._fh is None:
@@ -261,7 +309,6 @@ class MboxWriter:
             if self._since_flush >= self.flush_every:
                 self._fh.flush()
                 self._since_flush = 0
-            if mid:
-                self._seen.add(mid.strip())
+            self._seen.add(mid)
             self.written += 1
             return True

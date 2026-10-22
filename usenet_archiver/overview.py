@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable, List, Optional, Sequence
 
+from .mboxout import msgid_key
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,6 +45,7 @@ def parse_overview_line(raw: bytes) -> Optional[OverviewRow]:
             return None
     # Fields: artnum\tSubject\tFrom\tDate\tMessage-ID\tReferences\tbytes\tlines[\tXref]
     parts = text.split("\t")
+    raw_parts = raw.split(b"\t")
     if not parts or not parts[0].strip().isdigit():
         return None
     article_id = int(parts[0].strip())
@@ -78,7 +81,8 @@ def parse_overview_line(raw: bytes) -> Optional[OverviewRow]:
         subject=field(1),
         from_=field(2),
         date=date,
-        message_id=field(4),
+        # from the raw bytes, as the same key the mbox index uses
+        message_id=msgid_key(raw_parts[4]) if len(raw_parts) > 4 else "",
         references=field(5),
         bytes_=bytes_,
         lines=lines,
