@@ -89,15 +89,20 @@ class FakeNNTPServer:
                     continue
             except OSError:
                 break
+            # one thread per connection: the archiver keeps its main
+            # connection open while the fetch workers connect
+            threading.Thread(target=self._handle_and_close, args=(conn,), daemon=True).start()
+
+    def _handle_and_close(self, conn):
+        try:
+            self._handle(conn)
+        except Exception:
+            pass
+        finally:
             try:
-                self._handle(conn)
-            except Exception:
+                conn.close()
+            except OSError:
                 pass
-            finally:
-                try:
-                    conn.close()
-                except OSError:
-                    pass
 
     def _handle(self, conn):
         conn.settimeout(5)
