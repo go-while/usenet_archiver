@@ -58,6 +58,26 @@ def check_server_allowed(host: str) -> None:
         raise ValueError(BLOCKED_SERVER_MESSAGE)
 
 
+def group_name_problem(group: str) -> Optional[str]:
+    """Why group cannot be used as a newsgroup name, or None when it can.
+
+    The name goes into NNTP commands and, as "<group>.mbox", into a file
+    name in the working directory. RFC 3977 names are printable, without
+    whitespace; "/" or "\\" would put the mbox in another directory, a
+    leading "." or ".." would hide it or leave the directory. UTF-8 names
+    are allowed.
+    """
+    if not group:
+        return "empty"
+    if any(ord(c) < 0x21 or ord(c) == 0x7F for c in group):
+        return "whitespace or a control character"
+    if "/" in group or "\\" in group:
+        return "a / or \\"
+    if group.startswith(".") or ".." in group:
+        return "a leading '.' or '..'"
+    return None
+
+
 def is_binary_newsgroup(group: str) -> bool:
     """Return True if the group name looks like a binary group."""
     g = (group or "").lower()

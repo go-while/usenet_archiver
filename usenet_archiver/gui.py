@@ -427,10 +427,14 @@ class UsenetArchiverGUI:
             self.output_var.set(path)
 
     def _add_group(self) -> None:
-        from .policy import is_binary_newsgroup
+        from .policy import group_name_problem, is_binary_newsgroup
 
         name = self.group_var.get().strip()
         if not name:
+            return
+        problem = group_name_problem(name)
+        if problem:
+            messagebox.showwarning("Invalid newsgroup", f"{name!r} cannot be used: {problem}.")
             return
         if is_binary_newsgroup(name):
             messagebox.showwarning(
@@ -455,7 +459,7 @@ class UsenetArchiverGUI:
         self._update_job_preview()
 
     def _import_groups_file(self) -> None:
-        from .policy import is_binary_newsgroup, read_groups_file
+        from .policy import group_name_problem, is_binary_newsgroup, read_groups_file
 
         path = filedialog.askopenfilename(
             title="Import newsgroups (one per line)",
@@ -477,6 +481,10 @@ class UsenetArchiverGUI:
             # it has no '>', else group part for the list.
             group = line.split(">", 1)[0].strip()
             if not group:
+                continue
+            problem = group_name_problem(group)
+            if problem:
+                self._append_log(f"Skipping invalid newsgroup name {group!r}: {problem}")
                 continue
             if is_binary_newsgroup(group):
                 skipped_bin += 1
@@ -512,7 +520,11 @@ class UsenetArchiverGUI:
             self.job_preview_var.set("Output: (add at least one newsgroup)")
             return
         sample = groups[0]
-        name = mbox_name_for(sample, None, start, end)
+        try:
+            name = mbox_name_for(sample, None, start, end)
+        except ValueError:
+            self.job_preview_var.set(f"Output: (invalid newsgroup name {sample!r})")
+            return
         extra = f" (+{len(groups) - 1} more)" if len(groups) > 1 else ""
         if start and end:
             open_ended = not end_s and bool(start_s)
@@ -538,7 +550,7 @@ class UsenetArchiverGUI:
 
     def _validate(self) -> Dict[str, Any]:
         from .creds import split_host
-        from .policy import check_server_allowed, is_binary_newsgroup
+        from .policy import check_server_allowed, group_name_problem, is_binary_newsgroup
 
         server = self.server_var.get().strip()
         groups = [g for g in self._groups_from_listbox() if g.strip()]
@@ -557,6 +569,10 @@ class UsenetArchiverGUI:
         check_server_allowed(host)
         if not groups:
             raise ValueError("Add at least one newsgroup (or import a list).")
+        for g in groups:
+            problem = group_name_problem(g)
+            if problem:
+                raise ValueError(f"Invalid newsgroup name {g!r}: {problem}.")
         port_s = self.port_var.get().strip()
         if port_s and (not port_s.isdigit() or len(port_s) > 6):
             raise ValueError("Port must be at most 6 digits.")

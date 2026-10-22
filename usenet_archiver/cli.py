@@ -130,6 +130,11 @@ def mbox_name_for(group: str, filename: Optional[str], start_date, end_date) -> 
     """
     if filename:
         return filename
+    from .policy import group_name_problem
+
+    problem = group_name_problem(group)
+    if problem:
+        raise ValueError(f"invalid newsgroup name {group!r}: {problem}")
     if start_date is not None and end_date is not None:
         return f"{group}-{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}.mbox"
     return f"{group}.mbox"
@@ -790,14 +795,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         completed_log = "completed_newsgroups.log"
         incomplete = 0  # groups that failed or did not get every article
+        from .policy import group_name_problem
+
         for group, filename in group_specs:
-            mbox_filename = mbox_name_for(group, filename, start_date, end_date)
-            log_filename = mbox_filename.rsplit(".", 1)[0] + ".log"
-            file_handler = logging.FileHandler(log_filename)
-            file_handler.setFormatter(
-                logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-            )
-            logging.getLogger().addHandler(file_handler)
+            file_handler = None
+            pulling = False
             conn_kwargs = {
                 "server": endpoint.host,
                 "port": endpoint.port,
@@ -809,6 +811,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "response_timeout": args.response_timeout,
             }
             try:
+                # the name goes into commands and file names: check it first
+                problem = group_name_problem(group)
+                if problem:
+                    raise ValueError(f"invalid newsgroup name {group!r}: {problem}")
+                mbox_filename = mbox_name_for(group, filename, start_date, end_date)
+                log_filename = os.path.splitext(mbox_filename)[0] + ".log"
+                file_handler = logging.FileHandler(log_filename)
+                file_handler.setFormatter(
+                    logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+                )
+                logging.getLogger().addHandler(file_handler)
+                pulling = True
                 done = pull_group(
                     client=client,
                     group=group,
@@ -834,15 +848,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             except Exception as e:
                 logger.error("Failed group %s: %s", group, e)
                 incomplete += 1
-                # The failure may have left the connection out of step: the
-                # next group gets a new one.
-                try:
-                    client.reconnect()
-                except (NNTPError, OSError) as re_err:
-                    logger.error("Reconnect after %s failed: %s", group, re_err)
+                # A failure in the pull may have left the connection out of
+                # step: the next group gets a new one.
+                if pulling:
+                    try:
+                        client.reconnect()
+                    except (NNTPError, OSError) as re_err:
+                        logger.error("Reconnect after %s failed: %s", group, re_err)
             finally:
-                logging.getLogger().removeHandler(file_handler)
-                file_handler.close()
+                if file_handler is not None:
+                    logging.getLogger().removeHandler(file_handler)
+                    file_handler.close()
         if incomplete:
             logger.error("%s of %s group(s) failed or are incomplete", incomplete, len(group_specs))
             return 1
