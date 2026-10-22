@@ -98,9 +98,5 @@ class TestSharedMbox(unittest.TestCase):
         self.assertIn("comp.mbox\tcomp.b", self._entries())
 
 
-for _name in ("test_each_group_recorded", "test_skip_completed_skips_only_that_group", "test_old_bare_entry"):
-    setattr(TestSharedMbox, _name, unittest.expectedFailure(getattr(TestSharedMbox, _name)))
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -73,7 +73,7 @@ class TestBadGroupFailsOnlyItself(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertTrue(os.path.exists(os.path.join(tmp, "misc.test.mbox")))
             with open(os.path.join(tmp, "completed_newsgroups.log")) as fh:
-                self.assertEqual(fh.read().split(), ["misc.test.mbox"])
+                self.assertEqual(fh.read().splitlines(), ["misc.test.mbox\tmisc.test"])
             self.assertFalse(os.path.exists(os.path.join(tmp, "a")))
 
 

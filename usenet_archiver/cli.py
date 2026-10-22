@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -183,23 +184,55 @@ def normalize_message_id(mid: str) -> str:
     return mid
 
 
-def mark_completed(completed_log: str, mbox_filename: str, logger: logging.Logger) -> None:
-    """Append ``mbox_filename`` to the completed-jobs log after a successful pull."""
+def mark_completed(
+    completed_log: str, mbox_filename: str, logger: logging.Logger, group: Optional[str] = None
+) -> None:
+    """Append the job to the completed-jobs log after a successful pull.
+
+    One line per job: ``mbox<TAB>group``. The group is part of the job:
+    several groups can share an mbox (``-g a>x.mbox -g b>x.mbox``), and each
+    is complete on its own.
+    """
+    line = f"{mbox_filename}\t{group}" if group else mbox_filename
     try:
         with open(completed_log, "a", encoding="utf-8") as fh:
-            fh.write(f"{mbox_filename}\n")
+            fh.write(f"{line}\n")
             fh.flush()
             os.fsync(fh.fileno())
-        logger.info("Recorded successful pull of %s in %s", mbox_filename, completed_log)
+        logger.info("Recorded successful pull of %s (%s) in %s", mbox_filename, group, completed_log)
     except OSError as e:
         logger.error("Failed to update %s: %s", completed_log, e)
 
 
-def _record_completed(completed_log: str, mbox_filename: str, logger: logging.Logger) -> None:
+def is_completed(completed_log: str, mbox_filename: str, group: str) -> bool:
+    """Whether completed_log lists this job: the line ``mbox<TAB>group``.
+
+    A line with the mbox name alone (written before the group was recorded)
+    counts only for the group's own default mbox, ``group.mbox`` or
+    ``group-YYYYMMDD-YYYYMMDD.mbox``: a chosen name may be shared by several
+    groups, and the line does not say which of them was complete.
+    """
+    if not os.path.exists(completed_log):
+        return False
+    default = mbox_filename == f"{group}.mbox" or re.fullmatch(
+        re.escape(group) + r"-\d{8}-\d{8}\.mbox", mbox_filename
+    )
+    with open(completed_log, encoding="utf-8", errors="surrogateescape") as fh:
+        for line in fh:
+            line = line.rstrip("\r\n")
+            if "\t" in line:
+                if line.rsplit("\t", 1) == [mbox_filename, group]:
+                    return True
+            elif default and line.strip() == mbox_filename:
+                return True
+    return False
+
+
+def _record_completed(completed_log: str, mbox_filename: str, logger: logging.Logger, group: str) -> None:
     """mark_completed, unless a SIGTERM came in: a stopped run records nothing."""
     if _TERMINATED:
         raise TerminatedBySignal("terminated")
-    mark_completed(completed_log, mbox_filename, logger)
+    mark_completed(completed_log, mbox_filename, logger, group)
 
 
 def pull_group(
@@ -231,22 +264,21 @@ def pull_group(
     # dated windows.
     if skip_completed:
         try:
-            if os.path.exists(completed_log):
-                with open(completed_log, encoding="utf-8") as fh:
-                    done = {line.strip() for line in fh if line.strip()}
-                if mbox_filename in done and os.path.exists(mbox_filename):
+            if is_completed(completed_log, mbox_filename, group):
+                if os.path.exists(mbox_filename):
                     logger.info(
-                        "Skipping %s (already in %s; disable skip-completed to catch up)",
+                        "Skipping %s → %s (already in %s; disable skip-completed to catch up)",
+                        group,
                         mbox_filename,
                         completed_log,
                     )
                     return True
-                if mbox_filename in done and not os.path.exists(mbox_filename):
-                    logger.info(
-                        "%s is listed in %s but the mbox is missing; pulling again",
-                        mbox_filename,
-                        completed_log,
-                    )
+                logger.info(
+                    "%s → %s is listed in %s but the mbox is missing; pulling again",
+                    group,
+                    mbox_filename,
+                    completed_log,
+                )
         except OSError as e:
             logger.warning("Could not read %s: %s", completed_log, e)
 
@@ -259,7 +291,7 @@ def pull_group(
             logger.info("DRY-RUN: group %s is empty (would write %s)", group, mbox_filename)
             return True
         logger.info("Group %s is empty", group)
-        _record_completed(completed_log, mbox_filename, logger)
+        _record_completed(completed_log, mbox_filename, logger, group)
         return True
 
     rows = find_articles_in_date_range(
@@ -301,7 +333,7 @@ def pull_group(
 
     if not rows:
         logger.info("Nothing to fetch for %s", group)
-        _record_completed(completed_log, mbox_filename, logger)
+        _record_completed(completed_log, mbox_filename, logger, group)
         return True
 
     _ACTIVE_WRITER = writer
@@ -410,7 +442,7 @@ def pull_group(
     writer.close()
     if not clean:
         return False
-    _record_completed(completed_log, mbox_filename, logger)
+    _record_completed(completed_log, mbox_filename, logger, group)
     return True
 
 

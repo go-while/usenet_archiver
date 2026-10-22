@@ -159,6 +159,11 @@ mboxes, has the same limits; a longer line would stop its parser for the rest of
 502 access denied, 503, a timeout, a cut connection) counts as an error, and a failed OVER/XOVER
 fails the job; it is then not recorded, so a later run fetches what is missing.
 
+Each line of `completed_newsgroups.log` is one job, `mbox<TAB>group`, so groups that share an mbox
+(`-g a>x.mbox -g b>x.mbox`) are recorded and skipped each on its own. A line with only an mbox
+name, written by version 2.0.1 and earlier, still counts for the group's own default mbox
+(`group.mbox`, `group-YYYYMMDD-YYYYMMDD.mbox`), not for a chosen name.
+
 | Exit | Meaning |
 |------|---------|
 | 0 | every group complete |
