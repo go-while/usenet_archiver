@@ -797,3 +797,214 @@ func TestPluginChangesOnlyItsField(t *testing.T) {
 	want.Headers = append(append([]string{}, a.Headers[:7]...), a.Headers[9])
 	expectAll(t, r.mbox, []fakeserver.Article{want})
 }
+
+// numbered returns n plain articles with Message-IDs <i@tag>.
+func numbered(n int, tag string) []fakeserver.Article {
+	var arts []fakeserver.Article
+	for i := 1; i <= n; i++ {
+		arts = append(arts, art(fmt.Sprintf("<%d@%s>", i, tag), fmt.Sprintf("article %d", i)))
+	}
+	return arts
+}
+
+// storeServer serves arts in the group from a Store with the given options.
+func storeServer(t *testing.T, arts []fakeserver.Article, so fakeserver.StoreOptions, f fakeserver.Faults, o fakeserver.Options) (*fakeserver.Server, *fakeserver.Store) {
+	st := fakeserver.NewStore()
+	st.AddGroup(group, "")
+	for _, a := range arts {
+		st.AddArticle(group, a)
+	}
+	o.Store, o.StoreOpts, o.Faults = st, so, f
+	return fakeserver.New(t, o), st
+}
+
+// expectComplete: every article once, exit 0, recorded.
+func expectComplete(t T, r pullResult, want []fakeserver.Article) {
+	t.Helper()
+	expectAll(t, r.mbox, want)
+	if r.exit != 0 || !r.completed {
+		t.Errorf("exit %d completed %v\n%s", r.exit, r.completed, r.output)
+	}
+}
+
+// TestConnectionLimitBelowC (review 2, C2): the provider allows 2 connections
+// and the pull asks for 4. The connections over the limit get "502 Too many
+// connections"; the articles must still all be fetched by the ones that got
+// in, and the pull complete. The fetch is slow enough (30 ms per ARTICLE)
+// that the refused workers' retries end before it does.
+func TestConnectionLimitBelowC(t *testing.T) {
+	arts := numbered(200, "limit")
+	srv, _ := storeServer(t, arts, fakeserver.StoreOptions{},
+		fakeserver.Faults{Delay: map[string]time.Duration{"ARTICLE": 30 * time.Millisecond}},
+		fakeserver.Options{MaxConns: 2})
+	r := pull(t, srv.Addr(), "", "-C", "4")
+	expectComplete(t, r, arts)
+	if srv.Accepted() <= 3 {
+		t.Errorf("only %d connections accepted: the limit was never hit", srv.Accepted())
+	}
+}
+
+// TestRefusedGreetingOnce (review 2, C2): 502 for every connection over the
+// limit of 1 while the main connection is open; after GROUP the main
+// connection is closed for the fetch, so a retried worker gets in.
+func TestRefusedGreetingOnce(t *testing.T) {
+	arts := numbered(20, "greet")
+	srv, _ := storeServer(t, arts, fakeserver.StoreOptions{}, fakeserver.Faults{},
+		fakeserver.Options{MaxConns: 1, MaxConnsGreeting: "400 too busy, try later"})
+	expectComplete(t, pull(t, srv.Addr(), "", "-C", "2"), arts)
+}
+
+// TestCapabilitiesTimeout (review 2, C3): the CAPABILITIES reply arrives one
+// line a second and takes longer than --response-timeout. The connect must
+// fail cleanly (exit 3) instead of reading the rest of that reply as the
+// answer to GROUP; so no GROUP is sent at all.
+func TestCapabilitiesTimeout(t *testing.T) {
+	arts := numbered(3, "caps")
+	srv, _ := storeServer(t, arts, fakeserver.StoreOptions{},
+		fakeserver.Faults{LineDelay: map[string]time.Duration{"CAPABILITIES": time.Second}}, fakeserver.Options{})
+	r := pullWithin(t, 60*time.Second, srv.Addr(), "", "--response-timeout", "3")
+	if r.exit != 3 || r.completed {
+		t.Errorf("exit %d (want 3) completed %v\n%s", r.exit, r.completed, r.output)
+	}
+	if n := srv.Count("GROUP"); n != 0 {
+		t.Errorf("GROUP sent %d times after a CAPABILITIES timeout", n)
+	}
+}
+
+// TestLoginExpiresMidSession (review 2, C4): the server drops the login in
+// the middle of a session and answers 480 (nntp-testkit v0.4.1: a 480 ends
+// the Store server's login). The client must log in again on that
+// connection and go on; the pull completes.
+func TestLoginExpiresMidSession(t *testing.T) {
+	arts := numbered(12, "relogin")
+	cases := map[string]struct {
+		f       fakeserver.Faults
+		finding string
+	}{
+		// the 3rd ARTICLE on each connection: the rest of its pipeline gets 480 too
+		"ARTICLE": {fakeserver.Faults{Override: map[string][]string{"ARTICLE": {"480 Authentication required"}},
+			OverrideFrom: map[string]int{"ARTICLE": 3}, OverrideTimes: map[string]int{"ARTICLE": 1}}, "C4 (480 to ARTICLE)"},
+		// the 2nd OVER chunk on the main connection
+		"OVER": {fakeserver.Faults{Override: map[string][]string{"OVER": {"480 Authentication required"}},
+			OverrideFrom: map[string]int{"OVER": 2}, OverrideTimes: map[string]int{"OVER": 1}}, ""},
+	}
+	for name, c := range cases {
+		c := c
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv, _ := storeServer(t, arts, fakeserver.StoreOptions{User: "u", Pass: "p"}, c.f, fakeserver.Options{})
+			check := func(t T) {
+				r := pull(t, srv.Addr(), "", "-u", "u", "--password", "p", "--overview-chunk", "4")
+				expectComplete(t, r, arts)
+			}
+			if c.finding != "" {
+				knownBug(t, c.finding, check)
+			} else {
+				check(t)
+			}
+		})
+	}
+}
+
+// TestUserOnlyLogin (review 2, C6): a server that needs a user name but no
+// password answers 281 to AUTHINFO USER; the client must not send PASS
+// then (the server would answer 502), with or without a password given.
+func TestUserOnlyLogin(t *testing.T) {
+	arts := numbered(3, "useronly")
+	for name, extra := range map[string][]string{
+		"no password":   {"-u", "u"},
+		"with password": {"-u", "u", "--password", "p"},
+	} {
+		extra := extra
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv, _ := storeServer(t, arts, fakeserver.StoreOptions{User: "u"}, fakeserver.Faults{}, fakeserver.Options{})
+			expectComplete(t, pull(t, srv.Addr(), "", extra...), arts)
+			for _, l := range srv.Lines() {
+				if strings.HasPrefix(strings.ToUpper(l), "AUTHINFO PASS") {
+					t.Errorf("sent %q after 281", l)
+					break
+				}
+			}
+		})
+	}
+}
+
+// TestEmptyOverview (review 2, A5): how a pull treats an overview without
+// rows.
+func TestEmptyOverview(t *testing.T) {
+	arts := numbered(5, "ov")
+	empty224 := []string{"224 Overview information follows", "."}
+
+	// a broken overview database: OVER lists nothing although the articles
+	// are there (STAT finds them); the job must not be recorded
+	t.Run("broken overview", func(t *testing.T) {
+		t.Parallel()
+		srv, _ := storeServer(t, arts, fakeserver.StoreOptions{},
+			fakeserver.Faults{Override: map[string][]string{"OVER": empty224, "XOVER": empty224}}, fakeserver.Options{})
+		r := pull(t, srv.Addr(), "")
+		if r.exit == 0 || r.completed {
+			t.Errorf("exit %d completed %v\n%s", r.exit, r.completed, r.output)
+		}
+	})
+
+	// every article expired, GROUP still reports the old numbers (a lagging
+	// frontend), and an empty range gets an empty 224 instead of 423: STAT
+	// confirms the group is empty, so the job completes
+	t.Run("expired, stale numbers", func(t *testing.T) {
+		t.Parallel()
+		srv, st := storeServer(t, arts, fakeserver.StoreOptions{
+			EmptyOverReply: empty224,
+			GroupNumbers: func(conn int, g fakeserver.Group) fakeserver.Group {
+				g.Low, g.High, g.Count = 1, 5, 5
+				return g
+			},
+		}, fakeserver.Faults{}, fakeserver.Options{})
+		st.Expire(group, 6)
+		r := pull(t, srv.Addr(), "")
+		if r.exit != 0 || !r.completed {
+			t.Errorf("exit %d completed %v\n%s", r.exit, r.completed, r.output)
+		}
+		if got, _ := readMbox(t, r.mbox); len(got) != 0 {
+			t.Errorf("%d messages from an expired group", len(got))
+		}
+	})
+
+	// a gap in the numbers answered with an empty 224: the articles on both
+	// sides are fetched
+	t.Run("empty 224 for a gap", func(t *testing.T) {
+		t.Parallel()
+		st := fakeserver.NewStore()
+		st.AddGroup(group, "")
+		var want []fakeserver.Article
+		for _, n := range []int64{1, 2, 3, 40, 41} {
+			a := art(fmt.Sprintf("<%d@gap224>", n), "x")
+			a.Number = n
+			st.AddArticle(group, a)
+			want = append(want, a)
+		}
+		srv := fakeserver.New(t, fakeserver.Options{Store: st, StoreOpts: fakeserver.StoreOptions{EmptyOverReply: empty224}})
+		expectComplete(t, pull(t, srv.Addr(), "", "--overview-chunk", "10"), want)
+	})
+
+	// a server with XOVER only
+	t.Run("no OVER", func(t *testing.T) {
+		t.Parallel()
+		srv, _ := storeServer(t, arts, fakeserver.StoreOptions{NoOver: true}, fakeserver.Faults{}, fakeserver.Options{})
+		expectComplete(t, pull(t, srv.Addr(), ""), arts)
+		if srv.Count("XOVER") == 0 {
+			t.Errorf("XOVER never used")
+		}
+	})
+
+	// neither OVER nor XOVER, and no XHDR either: the group cannot be
+	// listed, which is a failure, not an empty group
+	t.Run("no OVER, no XOVER", func(t *testing.T) {
+		t.Parallel()
+		srv, _ := storeServer(t, arts, fakeserver.StoreOptions{NoOver: true, NoXover: true}, fakeserver.Faults{}, fakeserver.Options{})
+		r := pull(t, srv.Addr(), "")
+		if r.exit == 0 || r.completed {
+			t.Errorf("exit %d completed %v\n%s", r.exit, r.completed, r.output)
+		}
+	})
+}
