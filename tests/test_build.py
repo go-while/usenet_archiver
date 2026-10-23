@@ -75,7 +75,6 @@ class TestAppImageScript(unittest.TestCase):
         self.assertIn("sha256sum", s)
 
     @unittest.skipUnless(shutil.which("bash"), "needs bash")
-    @unittest.expectedFailure
     def test_libraries_copied_as_files(self):
         m = re.search(r"^copy_ld_deps\(\) \{\n.*?^\}\n", _read("scripts/build_appimage.sh"), re.M | re.S)
         self.assertIsNotNone(m)
@@ -108,7 +107,6 @@ class TestAppImageScript(unittest.TestCase):
         with open(os.path.join(lib, "libfoo.so.1")) as fh:
             self.assertEqual(fh.read(), "the library\n")
 
-    @unittest.expectedFailure
     def test_stdlib_copy_keeps_no_links_out_of_the_appimage(self):
         m = re.search(r"<<'PY'\n(.*?)\nPY\n", _read("scripts/build_appimage.sh"), re.S)
         self.assertIsNotNone(m)

@@ -86,12 +86,22 @@ skip_names = {
     "ensurepip", "venv", "site-packages", "dist-packages",
 }
 skip_suffixes = (".pyc", ".pyo")
+root = src.resolve()
+def outside(path):
+    # A link that leaves the stdlib (Debian's sitecustomize.py ->
+    # /etc/python3.10/sitecustomize.py) or leads nowhere.
+    if not path.is_symlink():
+        return False
+    target = path.resolve()
+    return not target.exists() or root not in target.parents
 def ignore(dirpath, names):
     ignored = []
     for n in names:
         if n in skip_names or n.endswith(skip_suffixes):
             ignored.append(n)
         elif n.startswith("config-") and "linux" in n:
+            ignored.append(n)
+        elif outside(Path(dirpath) / n):
             ignored.append(n)
     return ignored
 if dst.exists():
@@ -184,7 +194,9 @@ copy_ld_deps() {
         continue
         ;;
     esac
-    cp -an "${lib}" "${dest}/" 2>/dev/null || true
+    # -L: the file itself under the soname; a symlink such as
+    # libexpat.so.1 -> libexpat.so.1.8.7 would point at a file not copied.
+    cp -nL "${lib}" "${dest}/" 2>/dev/null || true
   done
 }
 
