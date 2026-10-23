@@ -31,7 +31,6 @@ UPSTREAM = "2.0.1"
 
 
 class TestVersion(unittest.TestCase):
-    @unittest.expectedFailure
     def test_fork_version(self):
         self.assertRegex(__version__, r"^" + re.escape(UPSTREAM) + r"-gw[1-9][0-9]*$")
 

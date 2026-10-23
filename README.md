@@ -17,8 +17,13 @@ Nothing here is aimed at binary/NZB workflows.
 | **Linux** | AppImage (`Usenet_Archiver-<ver>-x86_64.AppImage`) |
 | **OpenBSD / macOS / other** | Zipapp tarball (`usenet-archiver-<ver>-zipapp.tar.gz`) |
 
-GitHub Actions publishes both on tags matching `v*` (e.g. `v2.1.0`), after the unit and e2e tests
-pass; the tag must match the package version.
+GitHub Actions publishes both on tags matching `v*` (e.g. `v2.0.1-gw1`), after the unit and e2e
+tests pass; the tag must match the package version.
+
+Versions: this is the go-while fork of [tgeek77/usenet_archiver](https://github.com/tgeek77/usenet_archiver).
+It does not claim the upstream project's version numbers: a fork version is the upstream release it
+is based on plus `-gw<N>` (`2.0.1-gw1` is the first fork release on top of upstream 2.0.1). In
+`pyproject.toml`, which needs a PEP 440 version, it is spelled `2.0.1+gw1`.
 
 ```bash
 # Linux AppImage
@@ -375,7 +380,9 @@ LICENSE                  # BSD 2-Clause
 
 ## Changelog
 
-### 2.1.0 — 2026-10-23
+### 2.0.1-gw1 — 2026-10-23
+
+First release of the go-while fork, on top of upstream 2.0.1 ("2.0.1" below means upstream's).
 
 **Upgrading from 2.0.1: check your archives.** mboxes written by 2.0.1 and earlier may hold
 articles merged into the one before them (a body line starting `From ` was not quoted at every
