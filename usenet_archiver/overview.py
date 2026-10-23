@@ -11,6 +11,7 @@ little next to fetching the articles.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -125,22 +126,30 @@ def fetch_with_reconnect(client, start_id: int, end_id: int, tries: int = OVERVI
     """fetch_overview_chunk, retried on a new connection after any failure.
 
     After a timeout or a cut the old connection is out of step, so it is never
-    read again: client.reconnect() opens a new one and selects the group. The
-    last failure is raised.
+    read again: client.reconnect() opens a new one and selects the group. A
+    failed reconnect counts as a try. The last failure is raised.
     """
+    from . import nntp
     from .nntp import NNTPError, NNTPTimeout
 
+    need_reconnect = False
     for attempt in range(1, tries + 1):
+        connecting = need_reconnect
         try:
+            if need_reconnect:
+                client.reconnect()
+                need_reconnect = connecting = False
             return fetch_overview_chunk(client, start_id, end_id)
         except (NNTPTimeout, NNTPError, OSError) as e:
+            need_reconnect = True
             if attempt == tries:
                 raise
             logger.warning(
                 "Overview %s-%s failed (%s); reconnecting, try %s of %s",
                 start_id, end_id, e, attempt + 1, tries,
             )
-            client.reconnect()
+            if connecting:  # a refused connect: give the server a moment
+                time.sleep(nntp.RECONNECT_DELAY * attempt)
     raise AssertionError("unreachable")
 
 

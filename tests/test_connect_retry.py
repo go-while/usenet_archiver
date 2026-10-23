@@ -77,7 +77,6 @@ class Base(unittest.TestCase):
 
 
 class TestGreeting(Base):
-    @unittest.expectedFailure
     def test_refused_greeting_raises_with_the_reply(self):
         kw = self.serve(RefuseSome({1}, articles=_arts(1)))
         c = NNTPClient(**kw)
@@ -88,14 +87,12 @@ class TestGreeting(Base):
 
 
 class TestWorkerRetries(Base):
-    @unittest.expectedFailure
     def test_first_connect_refused_once(self):
         kw = self.serve(RefuseSome({1}, articles=_arts(50)))
         ok, missing, errors, got = self.fetch(kw, 50)
         self.assertEqual((ok, missing, errors), (50, 0, 0))
         self.assertEqual(got[50], b"Message-ID: <50@x>\n\nbody 50")
 
-    @unittest.expectedFailure
     def test_timeout_then_refused_reconnect(self):
         # the reconnect right after a timeout is refused once (the provider
         # has not released the old connection yet)
@@ -108,7 +105,6 @@ class TestWorkerRetries(Base):
         ok, missing, errors, _ = self.fetch(kw, 50)
         self.assertEqual((ok, missing, errors), (0, 0, 50))
 
-    @unittest.expectedFailure
     def test_slow_capabilities_at_worker_connect(self):
         kw = self.serve(FakeNNTPServer(articles=_arts(30), stalls={"CAPABILITIES": [1.5, 1]}))
         ok, missing, errors, _ = self.fetch(kw, 30)
@@ -116,7 +112,6 @@ class TestWorkerRetries(Base):
 
 
 class TestOverviewRetries(Base):
-    @unittest.expectedFailure
     def test_overview_reconnect_refused_once(self):
         srv = RefuseSome({2}, articles=_arts(30), stalls={"OVER 11-20": [1.5, 1]})
         kw = self.serve(srv)
@@ -129,7 +124,6 @@ class TestOverviewRetries(Base):
 
 
 class TestCapabilitiesTimeout(Base):
-    @unittest.expectedFailure
     def test_timeout_inside_capabilities_fails_the_connect(self):
         kw = self.serve(FakeNNTPServer(articles=_arts(1), stalls={"CAPABILITIES": [1.5, 1]}))
         c = NNTPClient(**kw)
@@ -193,19 +187,16 @@ class TestAuthinfo(unittest.TestCase):
         self.addCleanup(c.close)
         return c, srv
 
-    @unittest.expectedFailure
     def test_281_to_user_sends_no_password(self):
         c, srv = self.connect(b"281 no password needed")
         c.connect()
         self.assertFalse(any(cmd.upper().startswith(b"AUTHINFO PASS") for cmd in srv.commands))
 
-    @unittest.expectedFailure
     def test_user_without_password(self):
         c, srv = self.connect(b"281 no password needed", password=None)
         c.connect()
         self.assertIn(b"AUTHINFO USER u", srv.commands)
 
-    @unittest.expectedFailure
     def test_381_without_password_fails_clearly(self):
         c, _srv = self.connect(b"381 password required", password=None)
         with self.assertRaises(NNTPError) as cm:
@@ -217,7 +208,6 @@ class TestAuthinfo(unittest.TestCase):
         c.connect()
         self.assertEqual(srv.commands[:2], [b"AUTHINFO USER u", b"AUTHINFO PASS p"])
 
-    @unittest.expectedFailure
     def test_user_refused(self):
         c, _srv = self.connect(b"481 go away")
         with self.assertRaises(NNTPError) as cm:

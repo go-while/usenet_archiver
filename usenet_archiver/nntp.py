@@ -39,6 +39,11 @@ MAX_ARTICLE = 1 << 20  # bytes of article content (lines plus LF)
 # socket timeout only covers a single read.
 DEFAULT_RESPONSE_TIMEOUT = 300
 
+# Pause before a new try after a connect failed (seconds, times the try
+# number): a provider often refuses a new connection while it has not yet
+# released the one just dropped.
+RECONNECT_DELAY = 1.0
+
 # Status prefix (not an NNTP code) for an article that was read but not
 # kept: over MAX_ARTICLE, or with a line over MAX_LINE. It is counted and
 # skipped, like a missing article, since fetching it again cannot help.
@@ -121,19 +126,12 @@ class NNTPClient:
             welcome = self._recv_status()
             if self.verbose:
                 print(f"Welcome: {welcome}")
+            # 200/201 = ready; 400/502 = refused (e.g. too many connections)
+            if not welcome.startswith(("200", "201")):
+                raise NNTPError(f"Server refused the connection: {welcome}")
 
-            if self.username and self.password:
-                self.send(f"AUTHINFO USER {self.username}")
-                user_resp = self._recv_status()
-                if self.verbose:
-                    print(f"USER response: {user_resp}")
-
-                self.send(f"AUTHINFO PASS {self.password}")
-                auth_resp = self._recv_status()
-                if self.verbose:
-                    print(f"PASS response: {auth_resp}")
-                if not auth_resp.startswith("281"):
-                    raise NNTPError(f"Authentication failed: {auth_resp}")
+            if self.username:
+                self._authenticate()
 
             self.send("MODE READER")
             mode_resp = self._recv_status()
@@ -150,6 +148,25 @@ class NNTPClient:
         except BaseException:  # a signal (the CLI's TerminatedBySignal), Ctrl-C
             self.close()
             raise
+
+    def _authenticate(self) -> None:
+        """AUTHINFO USER, then PASS when the server asks for it (RFC 4643)."""
+        self.send(f"AUTHINFO USER {self.username}")
+        user_resp = self._recv_status()
+        if self.verbose:
+            print(f"USER response: {user_resp}")
+        if user_resp.startswith("281"):  # no password needed
+            return
+        if not user_resp.startswith("381"):
+            raise NNTPError(f"Authentication failed: {user_resp}")
+        if not self.password:
+            raise NNTPError(f"Authentication failed: the server asks for a password and none was given ({user_resp})")
+        self.send(f"AUTHINFO PASS {self.password}")
+        auth_resp = self._recv_status()
+        if self.verbose:
+            print(f"PASS response: {auth_resp}")
+        if not auth_resp.startswith("281"):
+            raise NNTPError(f"Authentication failed: {auth_resp}")
 
     def reconnect(self) -> None:
         """Drop the connection and open a new one, selecting the current group again.
@@ -310,24 +327,22 @@ class NNTPClient:
     # --- protocol helpers --------------------------------------------------
 
     def _probe_capabilities(self) -> Dict[str, List[str]]:
+        """CAPABILITIES; {} when the server does not know the command.
+
+        A timeout or a cut inside the reply raises: the stream is then out of
+        step, and the late reply would be read as the answer to GROUP.
+        """
         caps: Dict[str, List[str]] = {}
-        try:
-            self.send("CAPABILITIES")
-            resp = self._recv_status()
-            if not resp.startswith("101"):
-                return caps
-            for raw in self._read_multiline():
-                try:
-                    text = raw.decode("ascii", errors="replace").strip()
-                except Exception:
-                    continue
-                if not text:
-                    continue
-                parts = text.split()
-                name = parts[0].upper()
-                caps[name] = parts[1:]
-        except Exception as e:
-            self.logger.debug("CAPABILITIES probe failed: %s", e)
+        self.send("CAPABILITIES")
+        resp = self._recv_status()
+        if not resp.startswith("101"):
+            return caps
+        for raw in self._read_multiline():
+            text = raw.decode("ascii", errors="replace").strip()
+            if not text:
+                continue
+            parts = text.split()
+            caps[parts[0].upper()] = parts[1:]
         return caps
 
     def has_capability(self, name: str) -> bool:

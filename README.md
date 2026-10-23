@@ -119,6 +119,8 @@ Bulk archiving is blocked for hosts that are known to ban automation for rate-li
 
 Password precedence: **flag > password-file > env > netrc**.
 
+With a user name, `AUTHINFO USER` is sent, and the password only when the server asks for it (`381`). If it asks and there is no password, the connection fails (exit **3**).
+
 ### Options (shared + `pull`)
 
 Connection flags apply to every subcommand. Archiving flags apply to **`pull`**.
