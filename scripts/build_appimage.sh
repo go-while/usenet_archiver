@@ -23,12 +23,13 @@ if ! "${PYTHON}" -c "import tkinter" 2>/dev/null; then
   exit 1
 fi
 
-if [[ ! -x "${ROOT}/dist/usenet-archiver" ]]; then
-  echo "Building zipapp first ..."
-  "${ROOT}/scripts/build_zipapp.sh"
-fi
+# Always from this checkout: a dist/usenet-archiver left from an older build
+# would otherwise be bundled as it is.
+echo "Building zipapp ..."
+PYTHON="${PYTHON}" "${ROOT}/scripts/build_zipapp.sh"
 
-VERSION="$("${PYTHON}" -c "import sys; sys.path.insert(0, '${ROOT}'); from usenet_archiver import __version__; print(__version__)")"
+# Paths go to Python as arguments, never inside its source (a quote in the path).
+VERSION="$("${PYTHON}" -c 'import sys; sys.path.insert(0, sys.argv[1]); from usenet_archiver import __version__; print(__version__)' "${ROOT}")"
 ARCH="$(uname -m)"
 OUT="${OUT_DIR}/Usenet_Archiver-${VERSION}-${ARCH}.AppImage"
 
@@ -53,13 +54,15 @@ if [[ -n "${VIRTUAL_ENV:-}" ]] || [[ "${PY_REAL}" == */.venv/* ]]; then
   fi
 fi
 
+CP_ERR="$(mktemp)"
+trap 'rm -f "${CP_ERR}"' EXIT
 cp_tree() {
   # Prefer preserving mode/timestamps; ignore ownership failures (sandbox/FS).
-  if ! cp -a "$@" 2>/tmp/usenet-archiver-cp.err; then
-    if grep -qi 'ownership\|Operation not permitted\|Invalid argument' /tmp/usenet-archiver-cp.err 2>/dev/null; then
+  if ! cp -a "$@" 2>"${CP_ERR}"; then
+    if grep -qi 'ownership\|Operation not permitted\|Invalid argument' "${CP_ERR}" 2>/dev/null; then
       cp -a --no-preserve=ownership "$@" 2>/dev/null || cp -R "$@"
     else
-      cat /tmp/usenet-archiver-cp.err >&2
+      cat "${CP_ERR}" >&2
       return 1
     fi
   fi
@@ -72,11 +75,12 @@ chmod +x "${APPDIR}/usr/bin/python3"
 if [[ -d "/usr/lib/python${PYVER}" ]]; then
   mkdir -p "${APPDIR}/usr/lib/python${PYVER}"
   # Copy stdlib but skip bulky / unused trees to keep the AppImage smaller.
-  "${PYTHON}" - <<PY
+  "${PYTHON}" - "/usr/lib/python${PYVER}" "${APPDIR}/usr/lib/python${PYVER}" <<'PY'
 import shutil
+import sys
 from pathlib import Path
-src = Path("/usr/lib/python${PYVER}")
-dst = Path("${APPDIR}/usr/lib/python${PYVER}")
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
 skip_names = {
     "__pycache__", "test", "tests", "idlelib", "turtledemo",
     "ensurepip", "venv", "site-packages", "dist-packages",
@@ -200,32 +204,59 @@ for lib in /usr/lib/x86_64-linux-gnu/libtk*.so* /usr/lib/x86_64-linux-gnu/libtcl
   [[ -f "${lib}" ]] && cp -an "${lib}" "${APPDIR}/usr/lib/" 2>/dev/null || true
 done
 
+# Pinned releases of the build tools, checked by SHA-256 (the digests GitHub
+# lists for these release assets). Another architecture: install the tools
+# and set LINUXDEPLOY / APPIMAGETOOL.
+LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-${ARCH}.AppImage"
+APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${ARCH}.AppImage"
+case "${ARCH}" in
+  x86_64)
+    LINUXDEPLOY_SHA256="c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d"
+    APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+    ;;
+  aarch64)
+    LINUXDEPLOY_SHA256="620095110d693282b8ebeb244a95b5e911cf8f65f76c88b4b47d16ae6346fcff"
+    APPIMAGETOOL_SHA256="f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158"
+    ;;
+  *)
+    LINUXDEPLOY_SHA256=""
+    APPIMAGETOOL_SHA256=""
+    ;;
+esac
+
 download_tool() {
   local url="$1"
   local out="$2"
-  if [[ -x "${out}" ]]; then
+  local sha256="$3"
+  if [[ -z "${sha256}" ]]; then
+    echo "error: no checksum for $(basename "${out}") on ${ARCH}; install it and set LINUXDEPLOY / APPIMAGETOOL" >&2
+    return 1
+  fi
+  if [[ -x "${out}" ]] && echo "${sha256}  ${out}" | sha256sum -c --status; then
     return 0
   fi
   echo "Downloading $(basename "${out}") ..."
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL -o "${out}" "${url}"
+    curl -fsSL -o "${out}.part" "${url}"
   else
-    wget -q -O "${out}" "${url}"
+    wget -q -O "${out}.part" "${url}"
   fi
+  if ! echo "${sha256}  ${out}.part" | sha256sum -c --status; then
+    echo "error: $(basename "${out}") does not match its SHA-256 ${sha256}" >&2
+    rm -f "${out}.part"
+    return 1
+  fi
+  mv "${out}.part" "${out}"
   chmod +x "${out}"
 }
 
 # linuxdeploy (optional enrichment of deps)
 LINUXDEPLOY="${LINUXDEPLOY:-}"
 if [[ -z "${LINUXDEPLOY}" ]]; then
-  if [[ -x "${TOOLS}/linuxdeploy-${ARCH}.AppImage" ]]; then
-    LINUXDEPLOY="${TOOLS}/linuxdeploy-${ARCH}.AppImage"
-  elif command -v linuxdeploy >/dev/null 2>&1; then
+  if command -v linuxdeploy >/dev/null 2>&1; then
     LINUXDEPLOY="$(command -v linuxdeploy)"
   else
-    download_tool \
-      "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${ARCH}.AppImage" \
-      "${TOOLS}/linuxdeploy-${ARCH}.AppImage" || true
+    download_tool "${LINUXDEPLOY_URL}" "${TOOLS}/linuxdeploy-${ARCH}.AppImage" "${LINUXDEPLOY_SHA256}" || true
     LINUXDEPLOY="${TOOLS}/linuxdeploy-${ARCH}.AppImage"
   fi
 fi
@@ -267,14 +298,10 @@ fi
 
 APPIMAGETOOL="${APPIMAGETOOL:-}"
 if [[ -z "${APPIMAGETOOL}" ]]; then
-  if [[ -x "${TOOLS}/appimagetool-${ARCH}.AppImage" ]]; then
-    APPIMAGETOOL="${TOOLS}/appimagetool-${ARCH}.AppImage"
-  elif command -v appimagetool >/dev/null 2>&1; then
+  if command -v appimagetool >/dev/null 2>&1; then
     APPIMAGETOOL="$(command -v appimagetool)"
   else
-    download_tool \
-      "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage" \
-      "${TOOLS}/appimagetool-${ARCH}.AppImage"
+    download_tool "${APPIMAGETOOL_URL}" "${TOOLS}/appimagetool-${ARCH}.AppImage" "${APPIMAGETOOL_SHA256}"
     APPIMAGETOOL="${TOOLS}/appimagetool-${ARCH}.AppImage"
   fi
 fi

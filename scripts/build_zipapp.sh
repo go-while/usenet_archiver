@@ -27,7 +27,10 @@ if ! "${PYTHON}" -c "import zipapp" 2>/dev/null; then
   exit 1
 fi
 
-VERSION="$("${PYTHON}" -c "import pathlib,sys; sys.path.insert(0, '${ROOT}'); from usenet_archiver import __version__; print(__version__)")"
+# Paths go to Python as arguments, never inside its source: a quote in the
+# checkout path must not break the build (and bash quoting with @Q needs 4.4, while
+# macOS has 3.2).
+VERSION="$("${PYTHON}" -c 'import sys; sys.path.insert(0, sys.argv[1]); from usenet_archiver import __version__; print(__version__)' "${ROOT}")"
 TARBALL="${OUT_DIR}/usenet-archiver-${VERSION}-zipapp.tar.gz"
 
 echo "Staging into ${STAGE} ..."
@@ -35,12 +38,13 @@ rm -rf "${STAGE}"
 mkdir -p "${STAGE}" "${OUT_DIR}"
 
 echo "Copying usenet_archiver package from this checkout ..."
-"${PYTHON}" - <<PY
+"${PYTHON}" - "${ROOT}" "${STAGE}" <<'PY'
 import shutil
+import sys
 from pathlib import Path
 
-root = Path(${ROOT@Q})
-stage = Path(${STAGE@Q})
+root = Path(sys.argv[1])
+stage = Path(sys.argv[2])
 src = root / "usenet_archiver"
 dst = stage / "usenet_archiver"
 if dst.exists():

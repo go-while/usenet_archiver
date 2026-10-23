@@ -6,10 +6,20 @@ on:
       - "v*"
   workflow_dispatch:
 
+# Read only, except for the job that publishes the release.
 permissions:
-  contents: write
+  contents: read
+
+# "shell: bash" runs every step as bash -eo pipefail (the default is bash -e,
+# under which a failing command piped into head went unnoticed).
+defaults:
+  run:
+    shell: bash
 
 jobs:
+  tests:
+    uses: ./.github/workflows/test.yml
+
   zipapp:
     runs-on: ubuntu-22.04
     steps:
@@ -20,11 +30,22 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Tag matches __version__
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="$(python3 -c 'from usenet_archiver import __version__; print(__version__)')"
+          if [[ "${GITHUB_REF_NAME}" != "v${version}" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match __version__ ${version}" >&2
+            exit 1
+          fi
+
       - name: Build zipapp + tarball
         run: |
           chmod +x scripts/build_zipapp.sh bin/usenet-archiver
           ./scripts/build_zipapp.sh
-          ./dist/usenet-archiver -c --help | head -n 5
+          ./dist/usenet-archiver -c --help > help.txt
+          head -n 5 help.txt
+          grep -q "list-groups" help.txt
 
       - name: Upload zipapp tarball
         uses: actions/upload-artifact@v4
@@ -47,10 +68,11 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
           chmod +x scripts/build_zipapp.sh scripts/build_appimage.sh bin/usenet-archiver
-          ./scripts/build_zipapp.sh
           ./scripts/build_appimage.sh
           # Smoke-test CLI path inside AppImage (no display needed)
-          ./dist/Usenet_Archiver-*-x86_64.AppImage -c --help | head -n 5
+          ./dist/Usenet_Archiver-*-x86_64.AppImage -c --help > help.txt
+          head -n 5 help.txt
+          grep -q "list-groups" help.txt
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
@@ -59,9 +81,11 @@ jobs:
           path: dist/Usenet_Archiver-*.AppImage
 
   release:
-    needs: [zipapp, appimage]
+    needs: [tests, zipapp, appimage]
     runs-on: ubuntu-22.04
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4

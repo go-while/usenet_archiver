@@ -34,7 +34,6 @@ def _read(rel):
 
 @unittest.skipUnless(shutil.which("bash"), "needs bash")
 class TestZipapp(unittest.TestCase):
-    @unittest.expectedFailure
     def test_build_in_a_path_with_a_quote(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -52,18 +51,15 @@ class TestZipapp(unittest.TestCase):
         self.assertEqual(q.returncode, 0, q.stderr)
         self.assertIn("pull", q.stdout)
 
-    @unittest.expectedFailure
     def test_no_bash44_expansions(self):
         for script in ("scripts/build_zipapp.sh", "scripts/build_appimage.sh"):
             self.assertNotIn("@Q}", _read(script), script)
 
 
 class TestAppImageScript(unittest.TestCase):
-    @unittest.expectedFailure
     def test_zipapp_always_rebuilt(self):
         self.assertNotIn('if [[ ! -x "${ROOT}/dist/usenet-archiver" ]]', _read("scripts/build_appimage.sh"))
 
-    @unittest.expectedFailure
     def test_tools_pinned_and_checked(self):
         s = _read("scripts/build_appimage.sh")
         self.assertNotIn("/download/continuous/", s)
@@ -74,23 +70,19 @@ class TestReleaseWorkflow(unittest.TestCase):
     def setUp(self):
         self.yml = _read(".github/workflows/release.yml")
 
-    @unittest.expectedFailure
     def test_steps_run_with_pipefail(self):
         # "shell: bash" runs steps as bash -eo pipefail; the default is bash -e
         self.assertIn("defaults:\n  run:\n    shell: bash", self.yml)
 
-    @unittest.expectedFailure
     def test_release_waits_for_the_tests(self):
         self.assertIn("uses: ./.github/workflows/test.yml", self.yml)
         self.assertIn("workflow_call:", _read(".github/workflows/test.yml"))
         self.assertIn("needs: [tests, zipapp, appimage]", self.yml)
 
-    @unittest.expectedFailure
     def test_tag_checked_against_version(self):
         self.assertIn("__version__", self.yml)
         self.assertIn("GITHUB_REF_NAME", self.yml)
 
-    @unittest.expectedFailure
     def test_write_permission_only_for_the_release_job(self):
         top = self.yml.split("\njobs:", 1)[0]
         self.assertIn("contents: read", top)
