@@ -7,6 +7,7 @@ decoded for control flow, so ISO-8859-1 / KOI8-R / Shift_JIS bodies survive.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import socket
 import ssl
@@ -88,6 +89,20 @@ def _check_in_step(spec, resp: str) -> None:
         parts = resp.split()
         if len(parts) >= 2 and parts[1].isdigit() and int(parts[1]) != spec:
             raise NNTPError(f"ARTICLE {spec}: reply is for article {parts[1]}, stream out of step")
+
+
+def wildmat_match(name: str, wildmat: str) -> bool:
+    """Whether name matches an RFC 3977 wildmat: patterns with * ? [...],
+    separated by commas; one starting with ! excludes; the last pattern
+    that matches decides."""
+    result = False
+    for pattern in wildmat.split(","):
+        negate = pattern.startswith("!")
+        if negate:
+            pattern = pattern[1:]
+        if fnmatch.fnmatchcase(name, pattern):
+            result = not negate
+    return result
 
 
 class NNTPClient:
@@ -484,19 +499,24 @@ class NNTPClient:
         return result
 
     def list_active(self, wildmat: Optional[str] = None) -> List[str]:
-        """LIST ACTIVE [wildmat], falling back to LIST. Returns group names."""
+        """LIST ACTIVE [wildmat], falling back to LIST. Returns group names.
+
+        A bare LIST has no wildmat: its list is filtered here instead.
+        """
         if wildmat:
             cmd = f"LIST ACTIVE {wildmat}"
         else:
             cmd = "LIST ACTIVE"
         self.send(cmd)
         resp = self._recv_status()
+        filter_here = False
         if not resp.startswith("215"):
-            # Fall back to bare LIST
+            # Fall back to bare LIST (RFC 977 servers)
             self.send("LIST")
             resp = self._recv_status()
             if not resp.startswith("215"):
                 raise NNTPError(f"LIST failed: {resp}")
+            filter_here = bool(wildmat)
         names: List[str] = []
         for raw in self._read_multiline():
             try:
@@ -506,6 +526,8 @@ class NNTPClient:
             if not text:
                 continue
             name = text.split()[0]
+            if filter_here and not wildmat_match(name, wildmat):
+                continue
             names.append(name)
         return names
 

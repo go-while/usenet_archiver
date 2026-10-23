@@ -197,6 +197,8 @@ def find_articles_in_date_range(
     check, when given, is called before each chunk; it raises to stop the
     scan (the GUI's Stop).
     """
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1")
     if first > last:
         return []
 

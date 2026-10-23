@@ -842,6 +842,56 @@ def _parse_plugins(specs: List[str], parser: argparse.ArgumentParser) -> list:
     return plugins
 
 
+def _pull_arguments(args, parser: argparse.ArgumentParser, logger: logging.Logger):
+    """Check pull's arguments (parser.error, exit 2, on a bad one); returns
+    (start_date, end_date, plugins, group_specs)."""
+    if args.connections < 1:
+        parser.error("--connections must be >= 1")
+    if args.pipeline_depth < 1:
+        parser.error("--pipeline-depth must be >= 1")
+    if args.overview_chunk < 1:
+        parser.error("--overview-chunk must be >= 1")
+    if args.connections > 99:
+        sys.stderr.write(
+            f"Warning: --connections {args.connections} is high; "
+            "check your provider's concurrent-connection limit.\n"
+        )
+
+    try:
+        start_date = parse_date(args.start_date) if args.start_date else None
+    except ValueError as e:
+        parser.error(f"--start {args.start_date}: {e}")
+    try:
+        end_date = parse_date(args.end_date) if args.end_date else None
+    except ValueError as e:
+        parser.error(f"--end {args.end_date}: {e}")
+    try:
+        start_date, end_date = normalize_date_range(start_date, end_date, verbose=args.verbose)
+    except ValueError as e:
+        parser.error(str(e).replace("start date", "--start-date").replace("end date", "--end-date"))
+
+    plugins = _parse_plugins(args.plugin, parser)
+    if args.dedup:
+        for spec, plugin in zip(args.plugin, plugins):
+            if removes_message_id(plugin):
+                parser.error(
+                    f"--plugin {spec} removes Message-ID, by which the archive recognises "
+                    "an article: different articles would be skipped as duplicates. "
+                    "Keep Message-ID, or pull with --no-dedup"
+                )
+    try:
+        group_specs = collect_group_specs(args.newsgroups, args.groups_file)
+    except (OSError, UnicodeDecodeError) as e:
+        parser.error(f"cannot read the groups file {args.groups_file}: {e}")
+    group_specs = filter_binary_groups(group_specs, logger=logger)
+    if not group_specs:
+        parser.error(
+            "pull requires -g/--newsgroup and/or -f/--groups-file "
+            "(after skipping binary groups)"
+        )
+    return start_date, end_date, plugins, group_specs
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     try:
         return _main(argv)
@@ -882,6 +932,19 @@ def _main(argv: Optional[List[str]]) -> int:
 
     logger = setup_logging(args.verbose, args.syslog)
 
+    # Every argument is checked before connecting: a usage error is exit 2,
+    # without a login on the server.
+    if args.command == "get":
+        try:
+            message_id = normalize_message_id(args.message_id)
+        except ValueError as e:
+            parser.error(str(e))
+    elif args.command == "post":
+        plugins = _parse_plugins(args.plugin, parser)
+        groups = [g for g, _ in collect_group_specs(args.newsgroups, None)]
+    elif args.command == "pull":
+        start_date, end_date, plugins, group_specs = _pull_arguments(args, parser, logger)
+
     try:
         client = _connect_client(args, endpoint)
     except (NNTPError, OSError) as e:
@@ -893,59 +956,12 @@ def _main(argv: Optional[List[str]]) -> int:
             return cmd_list_groups(client, args.wildmat)
 
         if args.command == "get":
-            try:
-                return cmd_get_message(client, args.message_id)
-            except ValueError as e:
-                sys.stderr.write(f"{e}\n")
-                return 4
+            return cmd_get_message(client, message_id)
 
         if args.command == "post":
-            plugins = _parse_plugins(args.plugin, parser)
-            group_specs = collect_group_specs(args.newsgroups, None)
-            groups = [g for g, _ in group_specs]
             return cmd_post(client, groups, plugins)
 
         # pull
-        if args.connections < 1:
-            parser.error("--connections must be >= 1")
-        if args.pipeline_depth < 1:
-            parser.error("--pipeline-depth must be >= 1")
-        if args.connections > 99:
-            sys.stderr.write(
-                f"Warning: --connections {args.connections} is high; "
-                "check your provider's concurrent-connection limit.\n"
-            )
-
-        start_date = parse_date(args.start_date) if args.start_date else None
-        end_date = parse_date(args.end_date) if args.end_date else None
-        try:
-            start_date, end_date = normalize_date_range(
-                start_date, end_date, verbose=args.verbose
-            )
-        except ValueError as e:
-            parser.error(
-                str(e)
-                .replace("start date", "--start-date")
-                .replace("end date", "--end-date")
-            )
-
-        plugins = _parse_plugins(args.plugin, parser)
-        if args.dedup:
-            for spec, plugin in zip(args.plugin, plugins):
-                if removes_message_id(plugin):
-                    parser.error(
-                        f"--plugin {spec} removes Message-ID, by which the archive recognises "
-                        "an article: different articles would be skipped as duplicates. "
-                        "Keep Message-ID, or pull with --no-dedup"
-                    )
-        group_specs = collect_group_specs(args.newsgroups, args.groups_file)
-        group_specs = filter_binary_groups(group_specs, logger=logger)
-        if not group_specs:
-            parser.error(
-                "pull requires -g/--newsgroup and/or -f/--groups-file "
-                "(after skipping binary groups)"
-            )
-
         completed_log = "completed_newsgroups.log"
         incomplete = 0  # groups that failed or did not get every article
         from .policy import group_name_problem
@@ -1020,7 +1036,7 @@ def _main(argv: Optional[List[str]]) -> int:
         return 0
     except TerminatedBySignal:
         return 4
-    except NNTPError as e:
+    except (NNTPError, NNTPTimeout, OSError) as e:  # a timeout or a reset too
         sys.stderr.write(f"NNTP error: {e}\n")
         return 4
     finally:

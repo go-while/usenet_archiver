@@ -81,7 +81,7 @@ usenet-archiver -c post -g misc.test < msg.eml
 | Command | Purpose |
 |---------|---------|
 | **`pull`** | Fetch articles into mbox (default archiving path) |
-| **`list-groups`** | List newsgroups (optional wildmat) |
+| **`list-groups`** | List newsgroups (optional wildmat, e.g. `comp.*,!comp.binaries.*`; applied locally when the server only knows a bare `LIST`) |
 | **`get`** | Fetch one article by Message-ID to stdout |
 | **`post`** | Post one RFC 5322 message from stdin |
 
@@ -202,7 +202,9 @@ usenet-archiver -c pull \
 
 A spec is `name`, or `name:` followed by arguments separated by `:`; a header list is one argument,
 comma-separated: `--plugin strip_headers:To,Cc,X-Face`, `--plugin keep_headers:headers=From,Subject,Message-ID`.
-Plugins also apply to `post`.
+Plugins also apply to `post`. Arguments a plugin does not take (`strip_headers:To:Cc`) are refused
+before connecting (exit 2), like every other usage error: bad dates, a groups file that is missing
+or not UTF-8, `--overview-chunk` below 1.
 
 `pull` refuses a plugin that removes `Message-ID` (exit 2): dedup recognises an article by it, and
 without it different articles can look the same, so all but one would be skipped as duplicates.

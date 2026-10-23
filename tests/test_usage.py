@@ -80,7 +80,6 @@ class Base(unittest.TestCase):
 
 
 class TestPullArguments(Base):
-    @unittest.expectedFailure
     def test_overview_chunk_zero_or_negative(self):
         # in a subprocess with a time limit: the bug was an endless loop
         import subprocess
@@ -99,24 +98,20 @@ class TestPullArguments(Base):
             self.assertEqual(p.returncode, 2, p.stderr)
         self.assertEqual(self.srv.accepted, 0, "connected before the usage error")
 
-    @unittest.expectedFailure
     def test_bad_dates(self):
         for opt, value in (("--start", "2025-13-01"), ("--end", "yesterday")):
             err = self.assertUsageError("pull", "-g", "misc.test", opt, value)
             self.assertIn("YYYY-MM-DD", err)
 
-    @unittest.expectedFailure
     def test_missing_groups_file(self):
         err = self.assertUsageError("pull", "-f", "missing.txt")
         self.assertIn("missing.txt", err)
 
-    @unittest.expectedFailure
     def test_groups_file_not_utf8(self):
         with open(os.path.join(self.tmp, "groups.txt"), "wb") as fh:
             fh.write(b"de.alt.b\xfccher\n")
         self.assertUsageError("pull", "-f", "groups.txt")
 
-    @unittest.expectedFailure
     def test_bad_plugin_arguments(self):
         for spec in ("strip_headers:header=X-Foo", "strip_headers:To:Cc", "mimify:text/plain:utf-8:extra"):
             err = self.assertUsageError("pull", "-g", "misc.test", "--plugin", spec)
@@ -124,16 +119,13 @@ class TestPullArguments(Base):
 
 
 class TestOtherCommands(Base):
-    @unittest.expectedFailure
     def test_post_bad_plugin_arguments(self):
         self.assertUsageError("post", "-g", "misc.test", "--plugin", "mimify:text/plain:utf-8:extra",
                               stdin=b"Subject: t\n\nbody\n")
 
-    @unittest.expectedFailure
     def test_get_bad_message_id(self):
         self.assertUsageError("get", "no-at-sign")
 
-    @unittest.expectedFailure
     def test_timeouts_are_exit_4(self):
         self.srv.stalls = {"LIST ACTIVE": [1.5, None], "ARTICLE <1@X>": [1.5, None]}
         for args in (("list-groups", "-t", "1"), ("get", "-t", "1", "<1@x>")):
@@ -148,7 +140,6 @@ class TestPluginSpecs(unittest.TestCase):
                      "mimify:text/plain:utf-8", "keep_headers:From,Subject,Message-ID", "debug:a:b=c"):
             parse_plugin_spec(spec)
 
-    @unittest.expectedFailure
     def test_bad_specs(self):
         for spec in ("strip_headers:header=X-Foo", "strip_headers:To:Cc", "mimify:a:b:c",
                      "keep_headers:message=x"):
@@ -168,12 +159,10 @@ class TestListWildmat(unittest.TestCase):
 
     LIST = b"215 list follows\r\ncomp.lang.c 2 1 y\r\ncomp.lang.go 2 1 y\r\nalt.test 9 1 y\r\nde.test 3 1 y\r\n.\r\n"
 
-    @unittest.expectedFailure
     def test_fallback_to_list_keeps_the_filter(self):
         c = self.client(b"501 syntax error\r\n" + self.LIST)
         self.assertEqual(c.list_active("comp.*"), ["comp.lang.c", "comp.lang.go"])
 
-    @unittest.expectedFailure
     def test_wildmat_alternatives_and_negation(self):
         c = self.client(b"501 syntax error\r\n" + self.LIST)
         self.assertEqual(c.list_active("comp.*,!comp.lang.go,de.*"), ["comp.lang.c", "de.test"])

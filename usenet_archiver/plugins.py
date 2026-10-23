@@ -157,7 +157,8 @@ def parse_plugin_spec(spec: str) -> Callable[[RawArticle], Optional[RawArticle]]
     """Parse ``name`` or ``name:arg:arg:key=value`` into a partial callable.
 
     Positional args before any key=value become *args; key=value become kwargs.
-    The resulting callable accepts only ``message=``.
+    The resulting callable accepts only ``message=``. Arguments the plugin
+    does not take raise ValueError here, not when it first runs.
     """
     parts = spec.split(":")
     name = parts[0]
@@ -172,6 +173,13 @@ def parse_plugin_spec(spec: str) -> Callable[[RawArticle], Optional[RawArticle]]
             kwargs[key] = value
         else:
             args.append(part)
+    try:
+        inspect.signature(func).bind(*args, message=None, **kwargs)
+    except TypeError as e:
+        raise ValueError(
+            f"Bad arguments in --plugin {spec}: {e}. The syntax is name:arg:key=value; "
+            "several headers are one argument with commas, e.g. strip_headers:To,Cc"
+        ) from e
     return functools.partial(func, *args, **kwargs)
 
 
