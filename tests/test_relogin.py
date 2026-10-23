@@ -46,7 +46,6 @@ class Base(unittest.TestCase):
 
 
 class TestArticles(Base):
-    @unittest.expectedFailure
     def test_480_in_a_pipeline(self):
         c = self.client(
             b"220 1 <1@x>\r\nMessage-ID: <1@x>\r\n\r\none\r\n.\r\n"
@@ -72,7 +71,6 @@ class TestArticles(Base):
         (_spec, content, resp), = c.articles_pipelined([1])
         self.assertEqual((content, resp[:3]), (b"", "480"))
 
-    @unittest.expectedFailure
     def test_refused_login_raises(self):
         c = self.client(b"480 Authentication required\r\n381 more\r\n481 wrong\r\n")
         with self.assertRaises(AuthError):
@@ -80,7 +78,6 @@ class TestArticles(Base):
 
 
 class TestCommands(Base):
-    @unittest.expectedFailure
     def test_480_to_group(self):
         c = self.client(b"480 Authentication required\r\n381 more\r\n281 ok\r\n211 3 1 3 misc.test\r\n")
         self.assertEqual(c.group("misc.test")[:2], (1, 3))

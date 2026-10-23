@@ -877,30 +877,25 @@ func TestCapabilitiesTimeout(t *testing.T) {
 // connection and go on; the pull completes.
 func TestLoginExpiresMidSession(t *testing.T) {
 	arts := numbered(12, "relogin")
-	cases := map[string]struct {
-		f       fakeserver.Faults
-		finding string
-	}{
+	cases := map[string]fakeserver.Faults{
 		// the 3rd ARTICLE on each connection: the rest of its pipeline gets 480 too
-		"ARTICLE": {fakeserver.Faults{Override: map[string][]string{"ARTICLE": {"480 Authentication required"}},
-			OverrideFrom: map[string]int{"ARTICLE": 3}, OverrideTimes: map[string]int{"ARTICLE": 1}}, "C4 (480 to ARTICLE)"},
+		"ARTICLE": {Override: map[string][]string{"ARTICLE": {"480 Authentication required"}},
+			OverrideFrom: map[string]int{"ARTICLE": 3}, OverrideTimes: map[string]int{"ARTICLE": 1}},
 		// the 2nd OVER chunk on the main connection
-		"OVER": {fakeserver.Faults{Override: map[string][]string{"OVER": {"480 Authentication required"}},
-			OverrideFrom: map[string]int{"OVER": 2}, OverrideTimes: map[string]int{"OVER": 1}}, ""},
+		"OVER": {Override: map[string][]string{"OVER": {"480 Authentication required"}},
+			OverrideFrom: map[string]int{"OVER": 2}, OverrideTimes: map[string]int{"OVER": 1}},
 	}
-	for name, c := range cases {
-		c := c
+	for name, f := range cases {
+		f := f
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			srv, _ := storeServer(t, arts, fakeserver.StoreOptions{User: "u", Pass: "p"}, c.f, fakeserver.Options{})
-			check := func(t T) {
-				r := pull(t, srv.Addr(), "", "-u", "u", "--password", "p", "--overview-chunk", "4")
-				expectComplete(t, r, arts)
-			}
-			if c.finding != "" {
-				knownBug(t, c.finding, check)
-			} else {
-				check(t)
+			srv, _ := storeServer(t, arts, fakeserver.StoreOptions{User: "u", Pass: "p"}, f, fakeserver.Options{})
+			r := pull(t, srv.Addr(), "", "-u", "u", "--password", "p", "--overview-chunk", "4")
+			expectComplete(t, r, arts)
+			// USER and PASS once per connection, and once more on the
+			// connection that got the 480
+			if n, conns := srv.Count("AUTHINFO"), srv.Accepted(); n <= 2*conns {
+				t.Errorf("%d AUTHINFO lines on %d connections: no login again on an open connection", n, conns)
 			}
 		})
 	}

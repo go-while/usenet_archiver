@@ -155,7 +155,9 @@ Password precedence: **flag > password-file > env > netrc**. A `~/.netrc` passwo
 its own login: with `-u alice` and an entry for `bob`, no password comes from `~/.netrc`.
 
 With a user name, `AUTHINFO USER` is sent, and the password only when the server asks for it
-(`381`). If it asks and there is no password, the connection fails (exit **3**).
+(`381`). If it asks and there is no password, the connection fails (exit **3**). When the server asks
+again in the middle of a session (`480`: the login timed out), the client logs in again on that
+connection and repeats what got the `480`, once.
 
 ### Options (shared + `pull`)
 
@@ -429,6 +431,8 @@ Other changes that may need attention:
 - A refused or failed connect is retried (fetch workers, overview, the main connection for the next
   group); the greeting and the CAPABILITIES reply are checked; a main connection lost while idle is
   replaced.
+- A `480` in the middle of a session (the login timed out) is answered with a new login on that
+  connection, and the command is repeated.
 - At most `-C` connections per pull; workers stop when the fetch ends early.
 - Commands are UTF-8 (group names, passwords); a BOM is dropped from groups and password files.
 - `list-groups` filters by the wildmat itself when the server only knows a bare `LIST`.
