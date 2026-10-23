@@ -45,13 +45,11 @@ class Base(unittest.TestCase):
 
 
 class TestArgumentsMeanCLI(Base):
-    @unittest.expectedFailure
     def test_subcommand_without_c(self):
         p = self.module("pull", "--help")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("newsgroup", p.stdout.lower())
 
-    @unittest.expectedFailure
     def test_unknown_arguments_are_a_usage_error(self):
         for args in (("--server", "news.example", "--newsgroup", "comp.lang.c"), ("-v", "-c", "pull")):
             p = self.module(*args)
@@ -64,7 +62,6 @@ class TestArgumentsMeanCLI(Base):
 
 
 class TestV1Shim(Base):
-    @unittest.expectedFailure
     def test_v1_arguments_pull(self):
         arts = {n: (b"From: a@example.com\nNewsgroups: misc.test\nSubject: s\n"
                     b"Date: Wed, 15 Jan 2020 12:00:00 +0000\nMessage-ID: <id%d@ex.com>\n\nbody %d\n" % (n, n))
@@ -82,7 +79,6 @@ class TestV1Shim(Base):
 
 
 class TestLauncher(Base):
-    @unittest.expectedFailure
     def test_bin_launcher_from_another_directory(self):
         p = self.run_cmd([os.path.join(_ROOT, "bin", "usenet-archiver"), "-c", "--help"], pythonpath=False)
         self.assertEqual(p.returncode, 0, p.stderr)

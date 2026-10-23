@@ -644,7 +644,7 @@ def build_parser() -> argparse.ArgumentParser:
     conn = _connection_parser()
     parser = argparse.ArgumentParser(
         prog="usenet-archiver -c",
-        description="NNTP text archiver CLI (use subcommands). GUI is the default without -c.",
+        description="NNTP text archiver CLI (use subcommands). Without arguments, usenet-archiver launches the GUI.",
         epilog=(
             "Examples:\n"
             "  usenet-archiver -c pull -s news.example.com -u alice -g news.groups -n\n"
@@ -652,8 +652,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  usenet-archiver -c get '<mid@example.com>'\n"
             "  usenet-archiver -c post -g misc.test < msg.eml\n"
             "\n"
-            "Without -c, usenet-archiver launches the GUI. "
-            "Top-level --help / --version work without -c.\n"
+            "Without any argument, usenet-archiver launches the GUI; any argument means the CLI\n"
+            "(-c may be left out). Top-level --help / --version work without -c.\n"
             "Short and long forms are interchangeable (e.g. -s/--server, -u/--user)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,

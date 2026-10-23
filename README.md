@@ -69,7 +69,10 @@ Python **3.9+**, **standard library only** (no `pip` packages required for the C
 
 ## What the CLI does
 
-Invoke with **`-c`** and a **subcommand**:
+Invoke with **`-c`** and a **subcommand**. The GUI starts only when there are no arguments at all;
+any argument means the CLI (`-c` may be left out), and one it does not know is a usage error
+(exit 2), so a cron line never waits for a window. The old `app/usenet_archiver.py` still takes the
+version-1 arguments (`--server … --newsgroup …`) and runs them as `pull`.
 
 ```bash
 usenet-archiver -c pull -s news.example.com -g news.groups ...
