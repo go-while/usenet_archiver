@@ -21,6 +21,7 @@ import argparse
 import gzip
 import re
 import sys
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Iterator, List
@@ -178,7 +179,7 @@ def main(argv: List[str] = None) -> int:
                             continue
                         n += 1
                 files_ok += 1
-            except (OSError, EOFError, BatchError) as exc:
+            except (OSError, EOFError, zlib.error, BatchError) as exc:  # zlib.error: a corrupt deflate stream
                 files_failed += 1
                 print(f"Warning: {rel}: {exc} ({n} whole articles taken before that)", file=sys.stderr)
                 continue

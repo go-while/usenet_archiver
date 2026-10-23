@@ -292,12 +292,16 @@ As in the CLI, a group that fails (no such group, a lock, a timeout) is logged, 
 
 | Script | Purpose |
 |--------|---------|
-| **`extras/archive.sh`** | Monthly spool zip under `/opt/usenet/` |
+| **`extras/archive.sh`** | Monthly spool zip under `/opt/usenet/` (articles by mtime, 00:00:00 on the 1st through the last second of the month) |
 | **`extras/report.sh`** | Hierarchy size report (`REPORT_DIR`) |
 | **`extras/biggestgroups.sh`** | Top groups / expire / unwanted |
 | **`extras/Big-8_Report.sh`** | Big-8 ranking → `$HOME` |
 | **`extras/crosspost_report.sh`** | Crosspost counts CSV |
 | **`extras/gz2mbox.py`** | `.gz` article dumps → mboxrd |
+
+The shell scripts read the spool from `SPOOL` (default `/var/spool/news/articles`); `archive.sh` also
+takes `WORK` (default `/tmp/usenet`) and `DEST` (default `/opt/usenet`). An article that expires while
+`archive.sh` copies is left out, not an error.
 
 ---
 

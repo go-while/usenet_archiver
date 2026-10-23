@@ -86,7 +86,6 @@ class TestArchive(Base):
         self.article("comp/lang/go/4", "2026-01-15 12:00:00")
         self.article("comp/lang/go/5", "2025-12-31 23:59:59.900")  # December
 
-    @unittest.expectedFailure
     def test_month_edges(self):
         self.month_edges()
         p, members, _ = self.archive("1")
@@ -96,14 +95,12 @@ class TestArchive(Base):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(members, ["comp/lang/c/2"])
 
-    @unittest.expectedFailure
     def test_leading_zero_months(self):
         self.article("comp/lang/c/1", "2026-08-10 12:00:00")
         p, members, _ = self.archive("08")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(members, ["comp/lang/c/1"])
 
-    @unittest.expectedFailure
     def test_file_count_and_vanished_article(self):
         self.month_edges()
         # a find that also lists an article expired before rsync reads it
@@ -128,7 +125,6 @@ class TestArchive(Base):
 
 
 class TestGz2mboxCorrupt(Base):
-    @unittest.expectedFailure
     def test_corrupt_gz_does_not_stop_the_run(self):
         def art(n):
             return (b"Path: x!y\nFrom: a@b\nNewsgroups: t\nSubject: s%d\nMessage-ID: <%d@x>\n"
@@ -173,7 +169,6 @@ class TestReports(Base):
         with open(os.path.join(self.tmp, outs[0])) as fh:
             return fh.read()
 
-    @unittest.expectedFailure
     def test_big8_prefixes_anchored(self):
         for d in ("comp/lang/c", "soc/culture", "socal/x", "compx/y", "talk/z"):
             self.article(d + "/1")
@@ -181,7 +176,6 @@ class TestReports(Base):
         dirs = {line.split(" ", 1)[1].split("/spool/", 1)[1] for line in report.splitlines()[1:]}
         self.assertEqual(dirs, {"comp", "comp/lang", "comp/lang/c", "soc", "soc/culture", "talk", "talk/z"})
 
-    @unittest.expectedFailure
     def test_crosspost_folded_newsgroups(self):
         folded = self.article("a/1", text=b"Newsgroups: comp.a,\n comp.b,\n\tcomp.c\nSubject: s\n\nbody\n")
         plain = self.article("a/2", text=b"Subject: s\nNewsgroups: comp.a, comp.b\n\nbody\n")
