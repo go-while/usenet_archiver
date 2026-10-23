@@ -191,6 +191,28 @@ class NNTPClient:
         if not auth_resp.startswith("281"):
             raise AuthError(f"Authentication failed: {auth_resp}")
 
+    def _relogin(self, resp: str) -> bool:
+        """After a 480 (the server dropped the login, e.g. it timed out): log
+        in again on this connection. True when it did, False when resp is no
+        480 or there is no user name (the 480 then stands). A refused login
+        raises AuthError. The 480 is a one-line reply, so the stream is in
+        step."""
+        if not (isinstance(resp, str) and resp.startswith("480") and self.username):
+            return False
+        self.logger.info("Server asks to log in again (%s); sending AUTHINFO", resp)
+        self._authenticate()
+        return True
+
+    def _command(self, command: str) -> str:
+        """Send a command and read its status line; after a 480, log in
+        again and send it once more."""
+        self.send(command)
+        resp = self._recv_status()
+        if self._relogin(resp):
+            self.send(command)
+            resp = self._recv_status()
+        return resp
+
     def reconnect(self) -> None:
         """Drop the connection and open a new one, selecting the current group again.
 
@@ -375,8 +397,7 @@ class NNTPClient:
         return name.upper() in self.capabilities
 
     def group(self, newsgroup: str) -> Tuple[int, int, str]:
-        self.send(f"GROUP {newsgroup}")
-        resp = self._recv_status()
+        resp = self._command(f"GROUP {newsgroup}")
         if self.verbose:
             print(f"GROUP response: {resp}")
         if not resp.startswith("211"):
@@ -389,8 +410,7 @@ class NNTPClient:
         return first, last, resp
 
     def stat(self, article_id: int) -> Tuple[int, str]:
-        self.send(f"STAT {article_id}")
-        resp = self._recv_status()
+        resp = self._command(f"STAT {article_id}")
         if self.verbose:
             print(f"STAT {article_id} response: {resp}")
         if resp.startswith("223"):
@@ -407,7 +427,7 @@ class NNTPClient:
         return content, resp
 
     def articles_pipelined(
-        self, article_specs: Sequence
+        self, article_specs: Sequence, _relogged: bool = False
     ) -> List[Tuple[object, bytes, str]]:
         """Pipeline ARTICLE commands, then read responses in order (RFC 3977).
 
@@ -438,6 +458,14 @@ class NNTPClient:
             if self.verbose and content:
                 print(f"Fetched article {spec} (first 100 bytes): {content[:100]!r}...")
             results.append((spec, content, resp))
+        # 480: the server dropped the login mid-session (the rest of the
+        # pipeline gets 480 too). Every reply has been read, so the stream is
+        # in step: log in again and ask once more for what got the 480.
+        again = [i for i, (_s, _c, resp) in enumerate(results) if resp.startswith("480")]
+        if again and not _relogged and self._relogin(results[again[0]][2]):
+            retried = self.articles_pipelined([results[i][0] for i in again], _relogged=True)
+            for i, r in zip(again, retried):
+                results[i] = r
         return results
 
     def over(self, start_id: int, end_id: int) -> Tuple[List[bytes], str, str]:
@@ -455,8 +483,7 @@ class NNTPClient:
                 commands = ("XOVER", "OVER")
         last_resp = ""
         for cmd in commands:
-            self.send(f"{cmd} {start_id}-{end_id}")
-            resp = self._recv_status()
+            resp = self._command(f"{cmd} {start_id}-{end_id}")
             last_resp = resp
             if self.verbose:
                 print(f"{cmd} {start_id}-{end_id} response: {resp}")
@@ -477,8 +504,7 @@ class NNTPClient:
         423 (no articles in the range) gives []; any other failure raises
         NNTPError.
         """
-        self.send(f"XHDR DATE {start_id}-{end_id}")
-        resp = self._recv_status()
+        resp = self._command(f"XHDR DATE {start_id}-{end_id}")
         if self.verbose:
             print(f"XHDR DATE {start_id}-{end_id} response: {resp}")
         if resp.startswith("423"):
@@ -507,13 +533,11 @@ class NNTPClient:
             cmd = f"LIST ACTIVE {wildmat}"
         else:
             cmd = "LIST ACTIVE"
-        self.send(cmd)
-        resp = self._recv_status()
+        resp = self._command(cmd)
         filter_here = False
         if not resp.startswith("215"):
             # Fall back to bare LIST (RFC 977 servers)
-            self.send("LIST")
-            resp = self._recv_status()
+            resp = self._command("LIST")
             if not resp.startswith("215"):
                 raise NNTPError(f"LIST failed: {resp}")
             filter_here = bool(wildmat)
@@ -533,8 +557,7 @@ class NNTPClient:
 
     def post(self, message: bytes) -> str:
         """POST a raw RFC 5322 message (bytes). Returns the final status line."""
-        self.send("POST")
-        resp = self._recv_status()
+        resp = self._command("POST")
         if not resp.startswith("340"):
             raise NNTPError(f"POST rejected: {resp}")
         if self.conn is None:
