@@ -106,7 +106,12 @@ def _date_only(dt: Optional[datetime]):
     if dt is None:
         return None
     if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc)
+        try:
+            dt = dt.astimezone(timezone.utc)
+        except OverflowError:
+            # e.g. 9999-12-31 23:00 -0200, past datetime's range in UTC: its
+            # own date is at most a day off
+            pass
     return dt.date()
 
 

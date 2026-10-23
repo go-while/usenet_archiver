@@ -30,7 +30,6 @@ class RawOverClient:
 
 
 class TestDateOverflow(unittest.TestCase):
-    @unittest.expectedFailure
     def test_year_9999_with_negative_zone(self):
         lines = [
             b"1\ts\tf\tWed, 15 Jan 2020 12:00:00 +0000\t<1@x>\t\t1\t1",
@@ -42,7 +41,6 @@ class TestDateOverflow(unittest.TestCase):
         )
         self.assertEqual([r.article_id for r in rows], [1, 3])
 
-    @unittest.expectedFailure
     def test_year_1_with_positive_zone(self):
         early = datetime(1, 1, 1, 1, 0, tzinfo=timezone(timedelta(hours=2)))
         from usenet_archiver import overview
