@@ -47,6 +47,14 @@ class TerminatedBySignal(BaseException):
     """
 
 
+def _check_stop() -> None:
+    """Raise TerminatedBySignal once a stop was asked for: SIGTERM, or Stop
+    in the GUI (which sets _TERMINATED and the stop event from its thread,
+    where nothing can be raised in the pull)."""
+    if _TERMINATED or (_STOP_EVENT is not None and _STOP_EVENT.is_set()):
+        raise TerminatedBySignal("stopped")
+
+
 def _handle_sigterm(signum, frame):
     """Stop the pull. Never touches the writer: the handler runs in the main
     thread, which may be inside MboxWriter.write holding its lock (closing it
@@ -358,7 +366,9 @@ def pull_group(
         end_date,
         chunk_size=overview_chunk,
         seen=seen,
+        check=_check_stop,
     )
+    _check_stop()
     overview_count = len(rows)
     logger.info("Overview matched %s articles for %s", overview_count, group)
     if not rows and not sum(seen) and first <= last:
@@ -376,6 +386,7 @@ def pull_group(
     # Index existing mbox for dedup without opening for append (dry-run must not
     # create or modify the mbox / completed log).
     writer = MboxWriter(mbox_filename, dedup=dedup, flush_every=100)
+    _check_stop()  # indexing a large mbox takes a while
     if dedup:
         rows = [r for r in rows if not writer.has_message_id(r.message_id)]
         logger.info("After dedup filter: %s articles to fetch", len(rows))

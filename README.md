@@ -277,7 +277,9 @@ Use a provider that allows automated bulk reading. Avoid hammering small free se
 
 Default when you run `usenet-archiver` (or `python3 -m usenet_archiver`) with no `-c`.
 
-Tkinter form for connection, credentials (prefer **password file** — see above), a **queue of newsgroups** (Add / Import list / Remove), dates, connections/pipeline, and output directory. Import accepts one newsgroup per line (`#` comments allowed). **Run pull** downloads; **Dry run** only plans (overview + dedup counts in the log). Runs work in a **background thread** with a status line, indeterminate progress bar, scrollable log, and **Stop**. Settings save to **`~/.usenet_archiverrc`** (mode `0600`); the password field itself is not written to that file.
+Tkinter form for connection, credentials (prefer **password file** — see above; a relative path means the directory the GUI was started in), a **queue of newsgroups** (Add / Import list / Remove / Clear), dates, connections/pipeline, and output directory. A queue entry is `group` or `group>filename`, as in a CLI groups file; Import reads such a file (UTF-8, `#` comments allowed). **Run pull** downloads; **Dry run** only plans (overview + dedup counts in the log). Runs work in a **background thread** with a status line, indeterminate progress bar, scrollable log, and **Stop**.
+
+As in the CLI, a group that fails (no such group, a lock, a timeout) is logged, and the queue goes on with the next one; the groups that failed or did not get every article are listed at the end. **Stop** takes effect between overview chunks, after the mbox index, and during the fetch; whole articles written so far stay in the mbox, and the job is not recorded as complete. Closing the window during a pull asks first, then stops the pull and closes once it has stopped. Settings save to **`~/.usenet_archiverrc`** (mode `0600`); the password field itself is not written to that file.
 
 ---
 

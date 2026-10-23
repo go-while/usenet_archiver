@@ -181,6 +181,7 @@ def find_articles_in_date_range(
     end_date: Optional[datetime],
     chunk_size: int = 10000,
     seen: Optional[List[int]] = None,
+    check: Optional[Callable[[], None]] = None,
 ) -> List[OverviewRow]:
     """Return overview rows for first..last whose Date falls in
     [start_date, end_date] (whole UTC days, inclusive), sorted by number.
@@ -192,6 +193,9 @@ def find_articles_in_date_range(
     seen, a list, gets the number of rows the server listed, in the window
     or not: none at all for a range that has articles means the overview is
     broken (see overview_is_missing).
+
+    check, when given, is called before each chunk; it raises to stop the
+    scan (the GUI's Stop).
     """
     if first > last:
         return []
@@ -202,7 +206,7 @@ def find_articles_in_date_range(
     start_d = start_date.date() if start_date else None
     end_d = end_date.date() if end_date else None
     logger.info("Overview scan: %s-%s (chunk=%s)", first, last, chunk_size)
-    return list(_scan_chunks(fetch, first, last, chunk_size, start_d, end_d, seen))
+    return list(_scan_chunks(fetch, first, last, chunk_size, start_d, end_d, seen, check))
 
 
 def _scan_chunks(
@@ -213,10 +217,13 @@ def _scan_chunks(
     start_d,
     end_d,
     seen: Optional[List[int]] = None,
+    check: Optional[Callable[[], None]] = None,
 ) -> List[OverviewRow]:
     matched: List[OverviewRow] = []
     cursor = start_id
     while cursor <= end_id:
+        if check is not None:
+            check()
         chunk_end = min(end_id, cursor + chunk_size - 1)
         # A failed chunk raises: skipping it would lose its articles silently.
         rows = fetch(cursor, chunk_end)

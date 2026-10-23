@@ -134,7 +134,6 @@ class Base(unittest.TestCase):
 
 
 class TestQueue(Base):
-    @unittest.expectedFailure
     def test_failing_group_does_not_end_the_queue(self):
         srv = self.serve(Server(missing={"no.such.group"}, articles={n: _art(n) for n in (1, 2, 3)}))
         root, g = self.make(srv.port, ["no.such.group", "misc.test"])
@@ -143,7 +142,6 @@ class TestQueue(Base):
         self.assertEqual(g.status_var.get(), "Incomplete")
         self.assertTrue(any("no.such.group" in m for _k, _t, m in messagebox.SHOWN))
 
-    @unittest.expectedFailure
     def test_relative_password_file_is_read_where_the_gui_started(self):
         srv = self.serve(Server(articles={1: _art(1)}))
         with open(os.path.join(self.tmp, "pw.txt"), "w") as fh:
@@ -156,7 +154,6 @@ class TestQueue(Base):
         self.assertEqual(messagebox.SHOWN, [("info", "Done", f"Wrote misc.test.mbox\nin {self.out}")])
         self.assertIn("AUTHINFO PASS secret", srv.commands)
 
-    @unittest.expectedFailure
     def test_group_with_file_override(self):
         srv = self.serve(Server(articles={n: _art(n) for n in (1, 2)}))
         path = os.path.join(self.tmp, "groups.txt")
@@ -169,7 +166,6 @@ class TestQueue(Base):
         self.run_pull(root, g)
         self.assertEqual(self.mbox_bodies("chosen.mbox"), 2)
 
-    @unittest.expectedFailure
     def test_import_of_a_file_that_is_not_utf8_says_so(self):
         path = os.path.join(self.tmp, "groups.txt")
         with open(path, "wb") as fh:
@@ -181,7 +177,6 @@ class TestQueue(Base):
 
 
 class TestAfterAnError(Base):
-    @unittest.expectedFailure
     def test_progress_stopped_and_log_handler_removed(self):
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
@@ -196,7 +191,6 @@ class TestAfterAnError(Base):
 
 
 class TestStop(Base):
-    @unittest.expectedFailure
     def test_stop_during_the_overview_scan(self):
         srv = self.serve(Server(articles={n: _art(n) for n in range(1, 21)}, stalls={"OVER 1-20": [0.6, 1]}))
         root, g = self.make(srv.port, ["misc.test"], connections_var="4")
@@ -207,7 +201,6 @@ class TestStop(Base):
         self.assertEqual(srv.sent("ARTICLE"), [])
         self.assertEqual(srv.sent("GROUP"), ["GROUP misc.test"])  # no fetch connection
 
-    @unittest.expectedFailure
     def test_scan_checks_between_chunks(self):
         from usenet_archiver.overview import find_articles_in_date_range
 
@@ -240,7 +233,6 @@ class TestClose(Base):
             handler()
         self.assertTrue(root.destroyed)
 
-    @unittest.expectedFailure
     def test_close_during_a_pull_stops_it_first(self):
         srv = self.serve(Server(articles={n: _art(n) for n in range(1, 21)}, stalls={"OVER 1-20": [0.6, 1]}))
         root, g = self.make(srv.port, ["misc.test"])
@@ -253,7 +245,6 @@ class TestClose(Base):
         self.assertFalse(os.path.exists(os.path.join(self.out, "misc.test.mbox")))
         self.assertFalse(os.path.exists(os.path.join(self.out, "completed_newsgroups.log")))
 
-    @unittest.expectedFailure
     def test_close_cancelled_keeps_the_pull(self):
         srv = self.serve(Server(articles={n: _art(n) for n in (1, 2)}, stalls={"OVER 1-2": [0.3, 1]}))
         root, g = self.make(srv.port, ["misc.test"])
