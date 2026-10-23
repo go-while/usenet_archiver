@@ -10,13 +10,25 @@ import re
 import signal
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Callable, List, Optional, Tuple
 
 from .creds import resolve_credentials
 from .fetch import fetch_articles_parallel
 from .mboxout import ArticleTooBig, MboxWriter
-from .nntp import DEFAULT_RESPONSE_TIMEOUT, MAX_ARTICLE, NNTPClient, NNTPError, is_missing_article, is_too_big
+from . import nntp
+from .nntp import (
+    DEFAULT_RESPONSE_TIMEOUT,
+    MAX_ARTICLE,
+    AuthError,
+    ConnectionClosed,
+    NNTPClient,
+    NNTPError,
+    NNTPTimeout,
+    is_missing_article,
+    is_too_big,
+)
 from .overview import find_articles_in_date_range, overview_is_missing
 from .plugins import RawArticle, apply_plugins, parse_plugin_spec, removes_message_id
 
@@ -243,6 +255,41 @@ def _record_completed(completed_log: str, mbox_filename: str, logger: logging.Lo
     mark_completed(completed_log, mbox_filename, logger, group)
 
 
+# Tries for GROUP on the main connection when it was lost or a new one is refused.
+GROUP_TRIES = 3
+
+
+def _select_group(client: NNTPClient, group: str, logger: logging.Logger):
+    """GROUP on the main connection, on a new one when needed.
+
+    The connection may have been closed while it sat idle (the mbox of the
+    group before being indexed, a group with nothing to fetch), and a new
+    one may be refused for a moment while the fetch connections of the
+    group before are released. Both are tried again. Any answer to GROUP
+    (411 no such group) and a refused login are not.
+    """
+    for attempt in range(1, GROUP_TRIES + 1):
+        connecting = client.conn is None
+        try:
+            if connecting:
+                client.connect()
+                connecting = False
+            return client.group(group)
+        except (NNTPError, NNTPTimeout, OSError) as e:
+            lost = isinstance(e, (ConnectionClosed, NNTPTimeout, OSError))
+            if isinstance(e, AuthError) or not (connecting or lost) or attempt == GROUP_TRIES:
+                raise
+            logger.warning(
+                "%s for %s (%s); new connection, try %s of %s",
+                "Connect failed" if connecting else "Connection lost",
+                group, e, attempt + 1, GROUP_TRIES,
+            )
+            client.close()
+            if connecting:  # refused: give the server a moment
+                time.sleep(nntp.RECONNECT_DELAY * attempt)
+    raise AssertionError("unreachable")
+
+
 def pull_group(
     client: NNTPClient,
     group: str,
@@ -290,9 +337,9 @@ def pull_group(
         except OSError as e:
             logger.warning("Could not read %s: %s", completed_log, e)
 
-    if client.conn is None:  # closed for the fetch of the group before
-        client.connect()
-    first, last, group_resp = client.group(group)
+    # the connection is closed during each fetch, and may have been lost
+    # while idle
+    first, last, group_resp = _select_group(client, group, logger)
     logger.info("GROUP %s: %s (first=%s last=%s)", group, group_resp, first, last)
     if first == 0 and last == 0:
         if dry_run:

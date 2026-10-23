@@ -109,7 +109,6 @@ class Base(unittest.TestCase):
 
 
 class TestQuit(unittest.TestCase):
-    @unittest.expectedFailure
     def test_quit_on_a_reset_connection_does_not_raise(self):
         a, b = socket.socketpair()
         b.close()
@@ -120,7 +119,6 @@ class TestQuit(unittest.TestCase):
 
 
 class TestIdleMainConnection(Base):
-    @unittest.expectedFailure
     def test_connection_dropped_after_a_group_with_nothing_to_fetch(self):
         srv = self.serve(DroppingServer(articles={n: _art(n) for n in (1, 2, 3)}))
         self.assertEqual(self.main(srv, "misc.a", "misc.b")[0], 0)
@@ -130,7 +128,6 @@ class TestIdleMainConnection(Base):
         rc, err = self.main(srv, "misc.a", "misc.b")
         self.assertEqual(rc, 0, err)
 
-    @unittest.expectedFailure
     def test_connection_reset_before_the_fetch(self):
         srv = self.serve(DroppingServer(articles={n: _art(n) for n in (1, 2, 3)}))
         self.hook_index("misc.a", lambda: srv.drop_all(reset=True))
@@ -139,7 +136,6 @@ class TestIdleMainConnection(Base):
         with open(os.path.join(self.tmp.name, "misc.a.mbox"), "rb") as fh:
             self.assertEqual(fh.read().count(b"\nbody "), 3)
 
-    @unittest.expectedFailure
     def test_reconnect_for_the_next_group_refused_once(self):
         # connections: 1 main, 2 the fetch of misc.a, 3 main again for misc.b
         # (refused: the provider has not released 2 yet), 4 the retry

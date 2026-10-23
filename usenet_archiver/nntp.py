@@ -22,6 +22,14 @@ class NNTPError(Exception):
     """Raised for unexpected NNTP protocol responses."""
 
 
+class ConnectionClosed(NNTPError):
+    """The server closed the connection (EOF where a reply was due)."""
+
+
+class AuthError(NNTPError):
+    """The server refused the user name or the password."""
+
+
 class LineTooLong(NNTPError):
     """A line over MAX_LINE. The rest of it has been read and dropped, so the
     stream is still in step."""
@@ -158,15 +166,15 @@ class NNTPClient:
         if user_resp.startswith("281"):  # no password needed
             return
         if not user_resp.startswith("381"):
-            raise NNTPError(f"Authentication failed: {user_resp}")
+            raise AuthError(f"Authentication failed: {user_resp}")
         if not self.password:
-            raise NNTPError(f"Authentication failed: the server asks for a password and none was given ({user_resp})")
+            raise AuthError(f"Authentication failed: the server asks for a password and none was given ({user_resp})")
         self.send(f"AUTHINFO PASS {self.password}")
         auth_resp = self._recv_status()
         if self.verbose:
             print(f"PASS response: {auth_resp}")
         if not auth_resp.startswith("281"):
-            raise NNTPError(f"Authentication failed: {auth_resp}")
+            raise AuthError(f"Authentication failed: {auth_resp}")
 
     def reconnect(self) -> None:
         """Drop the connection and open a new one, selecting the current group again.
@@ -191,13 +199,14 @@ class NNTPClient:
         self._buf = bytearray()
 
     def quit(self) -> None:
+        """QUIT and close. Never raises for a connection that is already
+        gone (reset while idle, say): closing is all that is left to do."""
         try:
             if self.conn is not None:
                 self.send("QUIT")
-                try:
-                    self._recv_status()
-                except Exception:
-                    pass
+                self._recv_status()
+        except (OSError, NNTPError, NNTPTimeout):
+            pass
         finally:
             self.close()
 
@@ -227,7 +236,7 @@ class NNTPClient:
                 raise NNTPTimeout(f"reply not complete after {self.response_timeout} s") from e
             raise NNTPTimeout("The read operation timed out") from e
         if not data:
-            raise NNTPError("Connection closed by server")
+            raise ConnectionClosed("Connection closed by server")
         return data
 
     def _readline(self) -> bytes:
