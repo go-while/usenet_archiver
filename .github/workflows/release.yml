@@ -74,6 +74,16 @@ jobs:
           head -n 5 help.txt
           grep -q "list-groups" help.txt
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: e2e/go.mod
+          cache-dependency-path: e2e/go.sum
+
+      # The AppImage is built on Ubuntu; run it over TLS on other
+      # distributions (a local test server, no real one).
+      - name: TLS from the AppImage on Fedora, Arch, openSUSE and Debian
+        run: ./scripts/check_appimage_tls.sh dist/Usenet_Archiver-*-x86_64.AppImage
+
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
         with:

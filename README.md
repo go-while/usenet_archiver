@@ -39,6 +39,13 @@ tar xzf usenet-archiver-*-zipapp.tar.gz
 ./usenet-archiver -c pull -h   # pull options
 ```
 
+TLS from the AppImage uses the system's CA certificates. The AppImage brings its own OpenSSL (from
+Ubuntu, which looks in `/usr/lib/ssl`); where that path does not exist, as on Fedora, Arch and
+openSUSE, the client loads the first of the usual system bundles (`/etc/ssl/certs/ca-certificates.crt`,
+`/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem`, …). `SSL_CERT_FILE` or `SSL_CERT_DIR`,
+when set, are used as they are. Before a release, CI runs the AppImage over TLS in Fedora, Arch,
+openSUSE and Debian containers.
+
 OpenBSD: `pkg_add python3` (and the Tk bindings for your Python if you want the GUI).
 
 ---
@@ -311,6 +318,13 @@ small stand-in for tkinter (`tests/faketk`); the tests of the shell scripts in `
 `scripts/` are skipped where bash, zip or rsync is missing. CI (`.github/workflows/test.yml`) runs
 both suites on every push.
 
+`scripts/check_appimage_tls.sh APPIMAGE` runs a built AppImage in Fedora, Arch, openSUSE and Debian
+containers (docker or podman) against a local NNTPS server (`e2e/cmd/nntps-testserver`, with a CA it
+makes at start): every symlink in the AppImage must point inside it, a certificate from a CA that is
+not trusted must be refused, and once the CA is in the system store the pull must get every article.
+`release.yml` runs it after building the AppImage. The unit tests' TLS server uses the test CA in
+`tests/data/tls`.
+
 ## Responsible use
 
 Use a provider that allows automated bulk reading. Avoid hammering small free servers.
@@ -368,11 +382,13 @@ app/usenet_archiver.py   # Back-compat shim: version-1 arguments run as pull
 bin/usenet-archiver      # Dev launcher (works from any directory)
 scripts/build_zipapp.sh  # → dist/usenet-archiver + *-zipapp.tar.gz
 scripts/build_appimage.sh
+scripts/check_appimage_tls.sh  # Built AppImage over TLS in Fedora, Arch, openSUSE, Debian containers
 assets/                  # App icon for AppImage
 extras/                  # Tradspool helpers + gz2mbox
 .github/workflows/       # test.yml: unit + e2e on every push; release.yml: AppImage + zipapp on v* tags
-tests/                   # Unit tests (tests/faketk: tkinter stand-in for the GUI tests)
+tests/                   # Unit tests (tests/faketk: tkinter stand-in for the GUI tests; tests/data/tls: test CA)
 e2e/                     # Go end-to-end tests: nntp-testkit → CLI → go-lib-mbox2nntp
+  cmd/nntps-testserver/  # NNTPS server for scripts/check_appimage_tls.sh
 Makefile
 pyproject.toml
 LICENSE                  # BSD 2-Clause
@@ -381,6 +397,20 @@ LICENSE                  # BSD 2-Clause
 ---
 
 ## Changelog
+
+### 2.0.1+gw2 — 2026-10-23
+
+Fixes the 2.0.1+gw1 AppImage outside Ubuntu.
+
+- **TLS from the AppImage on Fedora, Arch and openSUSE:** every certificate was refused
+  (`CERTIFICATE_VERIFY_FAILED`), public ones too, so with TLS (the default) no pull worked. The
+  AppImage's OpenSSL looks in `/usr/lib/ssl` only; the client now loads the system's CA bundle when
+  that path does not exist (see "Releases"). With 2.0.1+gw1, setting
+  `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt` works around it.
+- **The AppImage did not start** where the system has no libexpat (minimal Fedora, openSUSE and
+  Debian installs): seven libraries were bundled as symlinks to files that were not bundled. The
+  files are bundled now, and Debian's `sitecustomize.py` link to `/etc` is left out.
+- Before a release, CI runs the AppImage over TLS in Fedora, Arch, openSUSE and Debian containers.
 
 ### 2.0.1+gw1 — 2026-10-23
 
