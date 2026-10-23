@@ -47,14 +47,12 @@ class Wire(unittest.TestCase):
 
 
 class TestUtf8Commands(Wire):
-    @unittest.expectedFailure
     def test_utf8_group_name(self):
         c = self.client("211 3 1 3 de.alt.bücher\r\n".encode("utf-8"))
         first, last, _resp = c.group("de.alt.bücher")
         self.assertEqual((first, last), (1, 3))
         self.assertEqual(self.sent(), "GROUP de.alt.bücher\r\n".encode("utf-8"))
 
-    @unittest.expectedFailure
     def test_name_from_list_groups_goes_back_as_it_came(self):
         # list-groups decodes a name that is not UTF-8 with surrogateescape
         raw = b"de.alt.b\xfccher"
@@ -62,7 +60,6 @@ class TestUtf8Commands(Wire):
         c.group(raw.decode("utf-8", errors="surrogateescape"))
         self.assertEqual(self.sent(), b"GROUP " + raw + b"\r\n")
 
-    @unittest.expectedFailure
     def test_non_ascii_password(self):
         c = self.client(b"381 more\r\n281 ok\r\n", username="alice", password="pässwort")
         c._authenticate()
@@ -77,13 +74,11 @@ class TestBom(unittest.TestCase):
             fh.write(text)
         return path
 
-    @unittest.expectedFailure
     def test_groups_file_with_bom(self):
         path = self.write("comp.lang.c\r\nmisc.test>t.mbox\r\n")
         self.assertEqual(collect_group_specs(None, path), [("comp.lang.c", None), ("misc.test", "t.mbox")])
         self.assertEqual(read_groups_file(path), ["comp.lang.c", "misc.test>t.mbox"])
 
-    @unittest.expectedFailure
     def test_password_file_with_bom(self):
         path = self.write("secret\r\n")
         ep = resolve_credentials("127.0.0.1", None, "alice", None, password_file=path, use_netrc=False)
@@ -95,7 +90,6 @@ class TestGroupNameCheck(unittest.TestCase):
         for name in ("de.alt.bücher", "fj.rec.アニメ", "de.alt.b\udcfccher"):
             self.assertIsNone(group_name_problem(name), name)
 
-    @unittest.expectedFailure
     def test_invisible_characters_refused(self):
         # a BOM, a no-break space, a zero-width space, a line separator
         for name in ("﻿comp.lang.c", "comp.lang c", "comp.​lang.c", "comp.lang c"):
@@ -119,7 +113,6 @@ class TestNetrc(unittest.TestCase):
     def resolve(self, username):
         return resolve_credentials("news.example.com", None, username, None)
 
-    @unittest.expectedFailure
     def test_other_user_gets_no_netrc_password(self):
         ep = self.resolve("alice")
         self.assertEqual((ep.username, ep.password), ("alice", None))

@@ -101,7 +101,7 @@ Paths for `.mbox`, `.log`, and `completed_newsgroups.log` are relative to the wo
 
 ### Password file
 
-`--password-file` / the GUI “Password file” field must point to a **plain-text file whose entire contents are the NNTP password**. One line is recommended; a single trailing line end (LF or CRLF) is ignored, and a password that still contains a line break is refused (exit **2**). Do not put a username or other fields in that file (use `--username` / the Username field separately, or `~/.netrc`).
+`--password-file` / the GUI “Password file” field must point to a **plain-text file whose entire contents are the NNTP password**. One line is recommended; a single trailing line end (LF or CRLF) is ignored, and a password that still contains a line break is refused (exit **2**). Do not put a username or other fields in that file (use `--username` / the Username field separately, or `~/.netrc`). The file is read as UTF-8, and a BOM (as Windows Notepad writes it) is dropped; non-ASCII passwords are sent as UTF-8.
 
 ### Server blacklist
 
@@ -117,7 +117,7 @@ Bulk archiving is blocked for hosts that are known to ban automation for rate-li
 | `$NNTP_PASSWORD` | Password from the environment |
 | `~/.netrc` | Fallback (disable with **`--no-netrc`**) |
 
-Password precedence: **flag > password-file > env > netrc**.
+Password precedence: **flag > password-file > env > netrc**. A `~/.netrc` password is used only with its own login: with `-u alice` and an entry for `bob`, no password comes from `~/.netrc`.
 
 With a user name, `AUTHINFO USER` is sent, and the password only when the server asks for it (`381`). If it asks and there is no password, the connection fails (exit **3**).
 
@@ -135,7 +135,7 @@ Short and long forms are interchangeable (e.g. `-s` / `--server`, `-u` / `--user
 | `--password-file`, `--pass-file` | Plain-text file containing only the password |
 | `--no-netrc` | Ignore `~/.netrc` |
 | `-g`, `--group`, `--newsgroup` | Group (repeatable; optional `group>filename`) |
-| `-f`, `--file`, `--groups-file` | One `group[>filename]` per line |
+| `-f`, `--file`, `--groups-file` | One `group[>filename]` per line (UTF-8; a BOM is dropped; `#` starts a comment line) |
 | `--no-ssl` | Plain NNTP |
 | `-v`, `--verbose` / `--syslog` | Logging |
 | `-t`, `--timeout` | Timeout for one socket read (default **60**) |

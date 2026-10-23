@@ -217,7 +217,9 @@ class NNTPClient:
             # a name or a password with a line end would send a second command
             raise NNTPError("CR or LF inside an NNTP command")
         self.conn.settimeout(self.timeout)
-        self.conn.sendall(f"{command}\r\n".encode("ascii", errors="strict"))
+        # UTF-8 (RFC 3977 3.1, RFC 4643 for AUTHINFO); a name that came from
+        # the server undecodable (surrogateescape) goes back as it came
+        self.conn.sendall(f"{command}\r\n".encode("utf-8", errors="surrogateescape"))
 
     def _recv_raw(self, nbytes: int = 65536) -> bytes:
         if self.conn is None:

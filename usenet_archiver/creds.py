@@ -55,6 +55,7 @@ def get_default_nntp_server() -> Optional[str]:
 
 
 def _netrc_lookup(hostname: str) -> Tuple[Optional[str], Optional[str]]:
+    """(login, password) of hostname's ~/.netrc entry, or (None, None)."""
     try:
         nrc = netrc.netrc()
     except (OSError, netrc.NetrcParseError):
@@ -96,8 +97,9 @@ def resolve_credentials(
 
     if resolved_pass is None and password_file:
         # Entire file is the password, read as it is (newline="": no
-        # newline translation, so a CR inside it is seen and refused below)
-        with open(password_file, encoding="utf-8", newline="") as fh:
+        # newline translation, so a CR inside it is seen and refused below;
+        # utf-8-sig: a BOM, as Windows Notepad writes it, is dropped)
+        with open(password_file, encoding="utf-8-sig", newline="") as fh:
             raw = fh.read()
         # one line end, LF or CRLF, ends the file; it is not part of the password
         if raw.endswith("\r\n"):
@@ -113,10 +115,13 @@ def resolve_credentials(
 
     if use_netrc and (resolved_user is None or resolved_pass is None):
         n_user, n_pass = _netrc_lookup(host)
-        if resolved_user is None:
-            resolved_user = n_user
-        if resolved_pass is None:
-            resolved_pass = n_pass
+        # the entry's password goes with its login only (as in curl and
+        # ftp): another user name given gets none of it
+        if resolved_user is None or not n_user or n_user == resolved_user:
+            if resolved_user is None:
+                resolved_user = n_user
+            if resolved_pass is None:
+                resolved_pass = n_pass
 
     from .policy import check_server_allowed
 

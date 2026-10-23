@@ -84,7 +84,7 @@ def collect_group_specs(newsgroups: Optional[List[str]], groups_file: Optional[s
         if g:
             specs.append((g, f))
     if groups_file:
-        with open(groups_file, encoding="utf-8") as fh:
+        with open(groups_file, encoding="utf-8-sig") as fh:  # -sig: a BOM is dropped
             for line in fh:
                 line = line.strip()
                 if not line or line.startswith("#"):
