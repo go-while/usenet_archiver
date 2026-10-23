@@ -134,7 +134,6 @@ class Base(unittest.TestCase):
 
 
 class TestSystemBundleFallback(Base):
-    @unittest.expectedFailure
     def test_first_existing_bundle_is_loaded(self):
         self.defaults(NO_DEFAULT_PATHS)
         self.bundles(MISSING, TEST_CA)
@@ -142,7 +141,6 @@ class TestSystemBundleFallback(Base):
         self.assertIn("READER", c.capabilities)
         self.assertEqual(self.server.handshakes, 1)
 
-    @unittest.expectedFailure
     def test_unreadable_bundle_is_skipped(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

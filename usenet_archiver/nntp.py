@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import os
 import socket
 import ssl
 import time
@@ -105,6 +106,45 @@ def wildmat_match(name: str, wildmat: str) -> bool:
     return result
 
 
+# Where distributions keep the system's CA certificates (the list Go's
+# crypto/x509 uses). Python looks where its OpenSSL was built to look; the
+# AppImage bundles Ubuntu's OpenSSL, which looks in /usr/lib/ssl only, a path
+# that Fedora, Arch and openSUSE do not have.
+CA_BUNDLES = (
+    "/etc/ssl/certs/ca-certificates.crt",  # Debian, Ubuntu, Arch, Gentoo; Fedora links it
+    "/etc/pki/tls/certs/ca-bundle.crt",  # Fedora, RHEL
+    "/etc/ssl/ca-bundle.pem",  # openSUSE
+    "/etc/pki/tls/cacert.pem",  # OpenELEC
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",  # CentOS, RHEL 7
+    "/etc/ssl/cert.pem",  # Alpine, macOS
+)
+
+
+def tls_context() -> ssl.SSLContext:
+    """ssl.create_default_context(), plus the first readable CA_BUNDLES file
+    when OpenSSL has neither its default CA file nor its CA directory, and the
+    user has set neither SSL_CERT_FILE nor SSL_CERT_DIR. Verification stays
+    on: with no bundle found every certificate is refused, as before."""
+    context = ssl.create_default_context()
+    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
+        return context
+    paths = ssl.get_default_verify_paths()
+    if paths.cafile or paths.capath:
+        return context
+    log = logging.getLogger(__name__)
+    for bundle in CA_BUNDLES:
+        if not os.path.isfile(bundle):
+            continue
+        try:
+            context.load_verify_locations(cafile=bundle)
+        except (OSError, ssl.SSLError) as e:
+            log.debug("CA bundle %s not loaded: %s", bundle, e)
+            continue
+        log.debug("OpenSSL has no CA certificates at %s; using %s", paths.openssl_cafile, bundle)
+        break
+    return context
+
+
 class NNTPClient:
     def __init__(
         self,
@@ -141,8 +181,7 @@ class NNTPClient:
             sock = socket.create_connection((self.server, self.port), timeout=self.timeout)
             sock.settimeout(self.timeout)
             if self.use_ssl:
-                context = ssl.create_default_context()
-                sock = context.wrap_socket(sock, server_hostname=self.server)
+                sock = tls_context().wrap_socket(sock, server_hostname=self.server)
             self.conn = sock
             self._buf = bytearray()
 
