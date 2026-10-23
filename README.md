@@ -2,7 +2,8 @@
 
 Tools for **text Usenet** archives:
 
-1. **`usenet_archiver/`** — NNTP client package + Tk GUI (TLS/plain, OVER-based date discovery, multi-connection ARTICLE fetch → mbox).
+1. **`usenet_archiver/`** — NNTP client package + Tk GUI (TLS/plain, OVER-based date discovery,
+   multi-connection ARTICLE fetch → mbox).
 2. **`extras/`** — Local INN tradspool helpers + **`gz2mbox.py`**.
 
 Nothing here is aimed at binary/NZB workflows.
@@ -16,7 +17,8 @@ Nothing here is aimed at binary/NZB workflows.
 | **Linux** | AppImage (`Usenet_Archiver-<ver>-x86_64.AppImage`) |
 | **OpenBSD / macOS / other** | Zipapp tarball (`usenet-archiver-<ver>-zipapp.tar.gz`) |
 
-GitHub Actions publishes both on tags matching `v*` (e.g. `v2.0.1`).
+GitHub Actions publishes both on tags matching `v*` (e.g. `v2.1.0`), after the unit and e2e tests
+pass; the tag must match the package version.
 
 ```bash
 # Linux AppImage
@@ -63,13 +65,18 @@ Optional: `pip install .` installs the `usenet-archiver` console script (stdlib 
 
 ### Dependencies
 
-Python **3.9+**, **standard library only** (no `pip` packages required for the CLI). The GUI needs Tk (`python3-tk` on Debian/Ubuntu; OpenBSD Tk packages for your Python). Use **`-c`** for CLI-only when Tk is missing.
+Python **3.9+**, **standard library only** (no `pip` packages required for the CLI). The GUI needs
+Tk (`python3-tk` on Debian/Ubuntu; OpenBSD Tk packages for your Python). Use **`-c`** for CLI-only
+when Tk is missing.
 
 ---
 
 ## What the CLI does
 
-Invoke with **`-c`** and a **subcommand**:
+Invoke with **`-c`** and a **subcommand**. The GUI starts only when there are no arguments at all;
+any argument means the CLI (`-c` may be left out), and one it does not know is a usage error
+(exit 2), so a cron line never waits for a window. The old `app/usenet_archiver.py` still takes the
+version-1 arguments (`--server … --newsgroup …`) and runs them as `pull`.
 
 ```bash
 usenet-archiver -c pull -s news.example.com -g news.groups ...
@@ -81,7 +88,7 @@ usenet-archiver -c post -g misc.test < msg.eml
 | Command | Purpose |
 |---------|---------|
 | **`pull`** | Fetch articles into mbox (default archiving path) |
-| **`list-groups`** | List newsgroups (optional wildmat) |
+| **`list-groups`** | List newsgroups (optional wildmat, e.g. `comp.*,!comp.binaries.*`; applied locally when the server only knows a bare `LIST`) |
 | **`get`** | Fetch one article by Message-ID to stdout |
 | **`post`** | Post one RFC 5322 message from stdin |
 
@@ -90,22 +97,44 @@ usenet-archiver -c post -g misc.test < msg.eml
 - Opens NNTP (TLS default port **563**, or **`--no-ssl`** port **119**).
 - Discovers article ranges with **OVER / XOVER** (fallback **XHDR DATE**).
 - Fetches with **`--connections`** parallel sockets and **`--pipeline-depth`** pipelined `ARTICLE` commands.
-- Date window via **`--start-date`** / **`--end-date`** (`YYYY-MM-DD`). Omit end → through **today UTC**; omit start → from **1990-01-01**. Open-ended "since DATE" jobs include today's date in the mbox name, so the same request tomorrow is a **new pull**.
-- Writes **mbox** in **append** mode with **Message-ID dedup**; records a job in **`completed_newsgroups.log` only after a successful, complete pull** (cancelled / errored runs are not recorded). Re-running is safe and **incremental** via Message-ID dedup. Use **`--skip-completed`** to hard-skip jobs already listed.
+- Date window via **`--start-date`** / **`--end-date`** (`YYYY-MM-DD`). Omit end → through **today
+  UTC**; omit start → no lower bound (everything up to the end date, `group-until-YYYYMMDD.mbox`; an
+  existing `group-19900101-YYYYMMDD.mbox` from version 2.0.1 is used on). Open-ended "since DATE"
+  jobs include today's date in the mbox name, so the same request tomorrow is a **new pull**.
+- Writes **mbox** in **append** mode with **Message-ID dedup**; records a job in
+  **`completed_newsgroups.log` only after a successful, complete pull** (cancelled / errored runs
+  are not recorded). Re-running is safe and **incremental** via Message-ID dedup. Use
+  **`--skip-completed`** to hard-skip jobs already listed.
 - Article payloads stay **bytes** end to end; missing articles (`430`/`423`) are skipped.
-- Newsgroup names containing **binary** (and common misspellings / translations) are **skipped** automatically.
-- Some servers are **blacklisted** for archiving (see below); the tool refuses them with *This server is not available for archiving*.
-- **`--dry-run` / `-n`** does everything except downloading article bodies: connect, `GROUP`, overview date scan, Message-ID dedup against an existing mbox. It does **not** fetch `ARTICLE`, append to the mbox, or update `completed_newsgroups.log`.
+- Newsgroup names containing **binary** (and common misspellings / translations) are **skipped**
+  automatically.
+- Some servers are **blacklisted** for archiving (see below); the tool refuses them with *This
+  server is not available for archiving*.
+- **`--dry-run` / `-n`** does everything except downloading article bodies: connect, `GROUP`,
+  overview date scan, Message-ID dedup against an existing mbox. It does **not** fetch `ARTICLE`,
+  append to the mbox, or update `completed_newsgroups.log`.
 
 Paths for `.mbox`, `.log`, and `completed_newsgroups.log` are relative to the working directory.
 
 ### Password file
 
-`--password-file` / the GUI “Password file” field must point to a **plain-text file whose entire contents are the NNTP password**. One line is recommended; a single trailing line end (LF or CRLF) is ignored, and a password that still contains a line break is refused (exit **2**). Do not put a username or other fields in that file (use `--username` / the Username field separately, or `~/.netrc`).
+`--password-file` / the GUI “Password file” field must point to a **plain-text file whose entire
+contents are the NNTP password**. One line is recommended; a single trailing line end (LF or CRLF)
+is ignored, and a password that still contains a line break is refused (exit **2**). Do not put a
+username or other fields in that file (use `--username` / the Username field separately, or
+`~/.netrc`). The file is read as UTF-8, and a BOM (as Windows Notepad writes it) is dropped;
+non-ASCII passwords are sent as UTF-8.
 
 ### Server blacklist
 
-Bulk archiving is blocked for hosts that are known to ban automation for rate-limit abuse. The list lives in [`usenet_archiver/policy.py`](usenet_archiver/policy.py) as `SERVER_BLACKLIST` (easy to extend). Currently includes **Eternal September** hosts ([tech info](https://www.eternal-september.org/index.php?showpage=techinfo)): `news.eternal-september.org`, `reader80.eternal-september.org`, `reader443.eternal-september.org`, and any subdomain of `eternal-september.org`. The check compares host names only: an IP address or another DNS name for the same server is not caught, so it is a guard against mistakes, not a lock.
+Bulk archiving is blocked for hosts that are known to ban automation for rate-limit abuse. The list
+lives in [`usenet_archiver/policy.py`](usenet_archiver/policy.py) as `SERVER_BLACKLIST` (easy to
+extend). Currently includes **Eternal September** hosts
+([tech info](https://www.eternal-september.org/index.php?showpage=techinfo)):
+`news.eternal-september.org`,
+`reader80.eternal-september.org`, `reader443.eternal-september.org`, and any subdomain of
+`eternal-september.org`. The check compares host names only: an IP address or another DNS name for
+the same server is not caught, so it is a guard against mistakes, not a lock.
 
 ### Credential and server resolution
 
@@ -117,7 +146,11 @@ Bulk archiving is blocked for hosts that are known to ban automation for rate-li
 | `$NNTP_PASSWORD` | Password from the environment |
 | `~/.netrc` | Fallback (disable with **`--no-netrc`**) |
 
-Password precedence: **flag > password-file > env > netrc**.
+Password precedence: **flag > password-file > env > netrc**. A `~/.netrc` password is used only with
+its own login: with `-u alice` and an entry for `bob`, no password comes from `~/.netrc`.
+
+With a user name, `AUTHINFO USER` is sent, and the password only when the server asks for it
+(`381`). If it asks and there is no password, the connection fails (exit **3**).
 
 ### Options (shared + `pull`)
 
@@ -133,7 +166,7 @@ Short and long forms are interchangeable (e.g. `-s` / `--server`, `-u` / `--user
 | `--password-file`, `--pass-file` | Plain-text file containing only the password |
 | `--no-netrc` | Ignore `~/.netrc` |
 | `-g`, `--group`, `--newsgroup` | Group (repeatable; optional `group>filename`) |
-| `-f`, `--file`, `--groups-file` | One `group[>filename]` per line |
+| `-f`, `--file`, `--groups-file` | One `group[>filename]` per line (UTF-8; a BOM is dropped; `#` starts a comment line) |
 | `--no-ssl` | Plain NNTP |
 | `-v`, `--verbose` / `--syslog` | Logging |
 | `-t`, `--timeout` | Timeout for one socket read (default **60**) |
@@ -153,11 +186,19 @@ See `usenet-archiver -c COMMAND --help` for per-command details.
 ### Exit codes and completed jobs
 
 A job is written to `completed_newsgroups.log` only when every article the overview listed was
-fetched, answered 423/430 (no such article), or was too big: an article over 1 MiB, or with a
-line over 1 MiB, is read but not written, and counted as `too-big` (mbox2nntp, which imports these
-mboxes, has the same limits; a longer line would stop its parser for the rest of the file). Any other answer (480 authentication required,
-502 access denied, 503, a timeout, a cut connection) counts as an error, and a failed OVER/XOVER
-fails the job; it is then not recorded, so a later run fetches what is missing.
+fetched, answered 423/430 (no such article), or was too big: an article over 1 MiB, with a line
+over 1 MiB, or whose body as stored in the mbox (quotes included) reaches 1 MiB, is read but not
+written, and counted as `too-big`. mbox2nntp, which imports these mboxes, has the same limits; a
+longer line would stop its parser for the rest of the file. Any other answer (480 authentication
+required, 502 access denied, 503, a timeout, a cut connection) counts as an error, and a failed
+OVER/XOVER fails the job; it is then not recorded, so a later run fetches what is missing. So does
+an overview that lists no article at all while `STAT` finds one of the numbers `GROUP` reported
+(a broken overview database).
+
+Each line of `completed_newsgroups.log` is one job, `mbox<TAB>group`, so groups that share an mbox
+(`-g a>x.mbox -g b>x.mbox`) are recorded and skipped each on its own. A line with only an mbox
+name, written by version 2.0.1 and earlier, still counts for the group's own default mbox
+(`group.mbox`, `group-YYYYMMDD-YYYYMMDD.mbox`), not for a chosen name.
 
 | Exit | Meaning |
 |------|---------|
@@ -190,7 +231,18 @@ usenet-archiver -c pull \
 | `keep_headers` | Keep listed headers; clear body |
 | `debug` | Print call args |
 
-### mbox format
+A spec is `name`, or `name:` followed by arguments separated by `:`; a header list is one argument,
+comma-separated: `--plugin strip_headers:To,Cc,X-Face`,
+`--plugin keep_headers:headers=From,Subject,Message-ID`.
+Plugins also apply to `post`. Arguments a plugin does not take (`strip_headers:To:Cc`) are refused
+before connecting (exit 2), like every other usage error: bad dates, a groups file that is missing
+or not UTF-8, `--overview-chunk` below 1.
+
+`pull` refuses a plugin that removes `Message-ID` (exit 2): dedup recognises an article by it, and
+without it different articles can look the same, so all but one would be skipped as duplicates.
+Keep `Message-ID` in a `keep_headers` list, or pull with `--no-dedup`.
+
+## mbox format
 
 Each article is stored as mboxrd, the way [mbox2nntp](https://github.com/go-while/mbox2nntp)
 imports it (its `internal/mboxout` is the reference):
@@ -204,9 +256,11 @@ imports it (its `internal/mboxout` is the reference):
 
 Nothing else changes: bytes are kept as they are, including 8-bit text and a CR inside a line.
 
-Articles over 1 MiB, or with a line over 1 MiB, are not written (see "Exit codes" below).
+Articles over 1 MiB, or with a line over 1 MiB, are not written, and neither is one whose body as
+stored (with the `>` quotes and the empty line after it) reaches 1 MiB, mbox2nntp's own limit
+(see "Exit codes" above).
 
-### Crash safety
+## Crash safety
 
 - Each message is appended with one `write()`; if that fails half way (disk full, Ctrl-C), the
   file is cut back to the last whole message.
@@ -222,7 +276,7 @@ Articles over 1 MiB, or with a line over 1 MiB, are not written (see "Exit codes
 - SIGTERM finishes the article being written, stops the pull, closes the mbox and exits 4.
 - A job is recorded in `completed_newsgroups.log` only after its mbox has been fsynced and closed.
 
-### Tests
+## Tests
 
 ```bash
 make test
@@ -243,11 +297,14 @@ make e2e
 cd e2e && go test -v ./...
 ```
 
-Tests for bugs that are not fixed yet are reported as skipped, with the number of the review
-finding; when such a test starts to pass it fails, so the mark is removed together with the fix.
-CI (`.github/workflows/test.yml`) runs both suites on every push.
+The e2e suite can mark a test for a known bug that is not fixed yet (`knownBug`, with the number of
+the review finding): it is then reported as skipped, and fails once it passes, so the mark goes
+with the fix. No test is marked at present. The GUI tests drive the Tk form headless through a
+small stand-in for tkinter (`tests/faketk`); the tests of the shell scripts in `extras/` and
+`scripts/` are skipped where bash, zip or rsync is missing. CI (`.github/workflows/test.yml`) runs
+both suites on every push.
 
-### Responsible use
+## Responsible use
 
 Use a provider that allows automated bulk reading. Avoid hammering small free servers.
 
@@ -257,7 +314,19 @@ Use a provider that allows automated bulk reading. Avoid hammering small free se
 
 Default when you run `usenet-archiver` (or `python3 -m usenet_archiver`) with no `-c`.
 
-Tkinter form for connection, credentials (prefer **password file** — see above), a **queue of newsgroups** (Add / Import list / Remove), dates, connections/pipeline, and output directory. Import accepts one newsgroup per line (`#` comments allowed). **Run pull** downloads; **Dry run** only plans (overview + dedup counts in the log). Runs work in a **background thread** with a status line, indeterminate progress bar, scrollable log, and **Stop**. Settings save to **`~/.usenet_archiverrc`** (mode `0600`); the password field itself is not written to that file.
+Tkinter form for connection, credentials (prefer **password file** — see above; a relative path
+means the directory the GUI was started in), a **queue of newsgroups** (Add / Import list / Remove /
+Clear), dates, connections/pipeline, and output directory. A queue entry is `group` or
+`group>filename`, as in a CLI groups file; Import reads such a file (UTF-8, `#` comments allowed).
+**Run pull** downloads; **Dry run** only plans (overview + dedup counts in the log). Runs work in a
+**background thread** with a status line, indeterminate progress bar, scrollable log, and **Stop**.
+
+As in the CLI, a group that fails (no such group, a lock, a timeout) is logged, and the queue goes
+on with the next one; the groups that failed or did not get every article are listed at the end.
+**Stop** takes effect between overview chunks, after the mbox index, and during the fetch; whole
+articles written so far stay in the mbox, and the job is not recorded as complete. Closing the
+window during a pull asks first, then stops the pull and closes once it has stopped. Settings save
+to **`~/.usenet_archiverrc`** (mode `0600`); the password field itself is not written to that file.
 
 ---
 
@@ -265,12 +334,16 @@ Tkinter form for connection, credentials (prefer **password file** — see above
 
 | Script | Purpose |
 |--------|---------|
-| **`extras/archive.sh`** | Monthly spool zip under `/opt/usenet/` |
+| **`extras/archive.sh`** | Monthly spool zip under `/opt/usenet/` (articles by mtime, 00:00:00 on the 1st through the last second of the month) |
 | **`extras/report.sh`** | Hierarchy size report (`REPORT_DIR`) |
 | **`extras/biggestgroups.sh`** | Top groups / expire / unwanted |
 | **`extras/Big-8_Report.sh`** | Big-8 ranking → `$HOME` |
 | **`extras/crosspost_report.sh`** | Crosspost counts CSV |
 | **`extras/gz2mbox.py`** | `.gz` article dumps → mboxrd |
+
+The shell scripts read the spool from `SPOOL` (default `/var/spool/news/articles`); `archive.sh` also
+takes `WORK` (default `/tmp/usenet`) and `DEST` (default `/opt/usenet`). An article that expires while
+`archive.sh` copies is left out, not an error.
 
 ---
 
@@ -278,20 +351,21 @@ Tkinter form for connection, credentials (prefer **password file** — see above
 
 ```
 usenet_archiver/         # Installable package (GUI + CLI + library)
-  app.py                 # Entry: GUI default, -c → CLI
+  app.py                 # Entry: GUI without arguments, otherwise the CLI (-c optional)
   gui.py                 # Tkinter GUI
   cli.py                 # argparse CLI
   policy.py              # Server blacklist + binary-group skips
   nntp.py fetch.py …     # NNTP, parallel fetch, overview, mbox, creds, plugins
-gui/usenet_archiver_gui.py  # Thin back-compat shim
-bin/usenet-archiver      # Dev launcher
+gui/usenet_archiver_gui.py  # Back-compat shim: starts the GUI
+app/usenet_archiver.py   # Back-compat shim: version-1 arguments run as pull
+bin/usenet-archiver      # Dev launcher (works from any directory)
 scripts/build_zipapp.sh  # → dist/usenet-archiver + *-zipapp.tar.gz
 scripts/build_appimage.sh
 assets/                  # App icon for AppImage
-app/usenet_archiver.py   # Back-compat shim
 extras/                  # Tradspool helpers + gz2mbox
-.github/workflows/       # Release: AppImage + zipapp tarball
-tests/
+.github/workflows/       # test.yml: unit + e2e on every push; release.yml: AppImage + zipapp on v* tags
+tests/                   # Unit tests (tests/faketk: tkinter stand-in for the GUI tests)
+e2e/                     # Go end-to-end tests: nntp-testkit → CLI → go-lib-mbox2nntp
 Makefile
 pyproject.toml
 LICENSE                  # BSD 2-Clause
@@ -301,19 +375,96 @@ LICENSE                  # BSD 2-Clause
 
 ## Changelog
 
+### 2.1.0 — 2026-10-23
+
+**Upgrading from 2.0.1: check your archives.** mboxes written by 2.0.1 and earlier may hold
+articles merged into the one before them (a body line starting `From ` was not quoted at every
+depth), articles cut short, or lack articles that failed; and such jobs were recorded in
+`completed_newsgroups.log` as complete after partial pulls. Check each of those mboxes with
+`mbox2nntp -dry-run`. To re-pull one, move it aside and pull into a new mbox (dedup against the old
+file would skip the articles that were cut short), and remove its lines from
+`completed_newsgroups.log` if you use `--skip-completed`.
+
+Other changes that may need attention:
+- Exit **1** when a group failed or did not get every article (2.0.1 exited 0); exit **4** for an
+  NNTP error, a timeout or SIGTERM.
+- `completed_newsgroups.log` lines are now `mbox<TAB>group`; 2.0.1's lines still count for the
+  group's own default mbox name.
+- `--end` alone has no lower bound and writes `group-until-YYYYMMDD.mbox`; an existing
+  `group-19900101-YYYYMMDD.mbox` from 2.0.1 is used on.
+- Any command-line argument now runs the CLI (`-c` may be left out); only no arguments at all start
+  the GUI. `app/usenet_archiver.py` runs version-1 arguments as `pull`.
+- `-u` without a password now sends `AUTHINFO USER`; a `~/.netrc` password is used only with its own
+  login.
+- `pull` refuses a plugin that removes `Message-ID`, unless `--no-dedup` is given.
+
+**mbox format** (see "mbox format")
+- mboxrd the way mbox2nntp reads it: `From ` and `#! rnews ` are quoted after any number of `>`, in
+  header and body (mbox2nntp v0.3.3 and later unquote both); CR and 8-bit bytes are kept;
+  `X-Mbox2nntp-Format: mboxrd` is the last header line; the envelope date is UTC.
+- Articles over 1 MiB, with a line over 1 MiB, or whose body as stored reaches 1 MiB (mbox2nntp's
+  limits) are skipped and counted as `too-big`.
+- One Message-ID extractor for the header, OVER and the mbox index; articles without one get a key.
+
+**Complete pulls only**
+- Only 423/430 count as missing; any other ARTICLE answer is an error, and a failed OVER/XOVER/XHDR
+  fails the job.
+- The date window scans the whole group with OVER instead of bisecting on Date (gaps and dates out of
+  order hid articles); a Date past datetime's range no longer stops the scan.
+- An overview that lists nothing while `STAT` finds an article fails the job; an XHDR line without
+  a value is kept.
+- Groups sharing an mbox are each recorded on their own; SIGTERM, also while connecting, records
+  nothing and exits 4.
+
+**Network**
+- After a timeout or a cut the connection is never read again: a new one is opened and the batch
+  retried. Every reply has a total deadline (`--response-timeout`, default 300 s).
+- A refused or failed connect is retried (fetch workers, overview, the main connection for the next
+  group); the greeting and the CAPABILITIES reply are checked; a main connection lost while idle is
+  replaced.
+- At most `-C` connections per pull; workers stop when the fetch ends early.
+- Commands are UTF-8 (group names, passwords); a BOM is dropped from groups and password files.
+- `list-groups` filters by the wildmat itself when the server only knows a bare `LIST`.
+
+**Crash safety** (see "Crash safety"): one `write()` per article, cut back on failure; the
+`.inprogress` journal; `flock`; a job is recorded only after the mbox is fsynced and closed.
+
+**CLI**: usage errors (bad dates, a missing or non-UTF-8 groups file, bad plugin arguments,
+`--overview-chunk` below 1) are exit 2 before connecting; newsgroup names are checked before they
+reach file names and commands; a user name or password with a line break is refused; plugins edit
+the article's bytes instead of re-serialising it.
+
+**GUI**: a failing group no longer ends the queue; Stop is seen before the fetch; the progress bar
+and log are cleaned up after an error; closing the window during a pull asks and stops it; queue
+entries may be `group>filename`; a relative password file means the directory the GUI started in.
+
+**Extras**: `gz2mbox.py` splits rnews batches by their byte counts, appends with dedup, and goes on
+after a corrupt `.gz`; `archive.sh` selects articles by file date with exact month edges and skips
+articles that expire while it copies; the report scripts count correctly (Big-8 names anchored,
+folded `Newsgroups` fields).
+
+**Tests and releases**: unit tests and end-to-end tests (nntp-testkit → CLI → go-lib-mbox2nntp) run
+in CI; a release waits for them and its tag must match the version; the AppImage tools are pinned
+and checked by SHA-256; the build scripts work from any path.
+
 ### 2.0.1 — 2026-07-25
 
 **Packaging & entry**
 - Default launch is the **Tk GUI**; use **`-c`** for the CLI.
 - **`--help`** / **`-h`** and **`--version`** / **`-V`** work without `-c`.
-- Single-file **zipapp** plus versioned **zipapp tarball**; Linux **AppImage** build script and GitHub Actions release workflow (`v*` tags).
+- Single-file **zipapp** plus versioned **zipapp tarball**; Linux **AppImage** build script and
+  GitHub Actions release workflow (`v*` tags).
 
 **CLI**
 - Subcommands: **`pull`**, **`list-groups`**, **`get`**, **`post`** (shared connection flags on each).
-- Short/long aliases for common options (`-s`/`--server`, `-u`/`--user`/`--username`, `-g`/`--group`/`--newsgroup`, `-f`/`--file`, `--start`/`--end`, `-C`/`--connections`, `-D`/`--depth`, `-n`/`--dry-run`, `--pass-file`, …).
-- **`--dry-run` / `-n`**: connect, overview scan, Message-ID dedup plan — no `ARTICLE` download, mbox write, or completed-log update.
+- Short/long aliases for common options (`-s`/`--server`, `-u`/`--user`/`--username`,
+  `-g`/`--group`/`--newsgroup`, `-f`/`--file`, `--start`/`--end`, `-C`/`--connections`,
+  `-D`/`--depth`, `-n`/`--dry-run`, `--pass-file`, …).
+- **`--dry-run` / `-n`**: connect, overview scan, Message-ID dedup plan — no `ARTICLE` download,
+  mbox write, or completed-log update.
 - **`--skip-completed`** is opt-in; re-pulls are incremental via Message-ID dedup by default.
-- `completed_newsgroups.log` is updated only after a **successful, complete** pull (not on cancel/errors/partial runs).
+- `completed_newsgroups.log` is updated only after a **successful, complete** pull (not on
+  cancel/errors/partial runs).
 
 **GUI**
 - Server + port on one row; username + password on one row (port limited to 6 digits).
@@ -323,7 +474,8 @@ LICENSE                  # BSD 2-Clause
 - Settings still saved to `~/.usenet_archiverrc` (mode `0600`).
 
 **Safety / policy** (`usenet_archiver/policy.py`)
-- **Server blacklist** including Eternal September hosts; blocked with *This server is not available for archiving* (list is easy to extend).
+- **Server blacklist** including Eternal September hosts; blocked with *This server is not available
+  for archiving* (list is easy to extend).
 - Newsgroups whose names look **binary** (`binary`, `bainary`, `binario`, …) are skipped automatically.
 
 ---

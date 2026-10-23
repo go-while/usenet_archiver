@@ -16,7 +16,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable, Dict, List, Optional
 
-from .cli import pull_group
+from .cli import parse_group_spec, pull_group
 from .creds import resolve_credentials
 from .nntp import NNTPClient
 from . import __version__
@@ -51,10 +51,12 @@ class UsenetArchiverGUI:
         self._stop_event = threading.Event()
         self._run_gen = 0
         self._log_handler: Optional[QueueLogHandler] = None
+        self._closing = False  # the window closes once the pull has stopped
 
         self.status_var = tk.StringVar(value="Ready")
         self._build()
         self._load_fields_from_config()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # --- config ------------------------------------------------------------
 
@@ -138,7 +140,9 @@ class UsenetArchiverGUI:
         self.log_text.delete("1.0", tk.END)
         self.log_text.configure(state=tk.DISABLED)
 
-    def _run_in_background(self, label: str, work_fn, done_fn=None) -> None:
+    def _run_in_background(self, label: str, work_fn, done_fn=None, always_fn=None) -> None:
+        """Run work_fn in a thread; then, on the Tk thread, always_fn() (also
+        after an error), and done_fn(result) when it did not fail."""
         self._active_tasks += 1
         active = self._active_tasks
         status = f"{label}… ({active} active)" if active > 1 else f"{label}…"
@@ -161,6 +165,11 @@ class UsenetArchiverGUI:
                 self.run_btn.configure(state=tk.NORMAL)
                 self.dry_run_btn.configure(state=tk.NORMAL)
                 self.stop_btn.configure(state=tk.DISABLED)
+                if always_fn is not None:
+                    always_fn()
+                if self._closing and self._active_tasks == 0:
+                    self.root.destroy()
+                    return
                 if error is not None:
                     err_text = str(error)
                     self._set_status(f"{label} failed")
@@ -432,14 +441,16 @@ class UsenetArchiverGUI:
         name = self.group_var.get().strip()
         if not name:
             return
-        problem = group_name_problem(name)
+        group, filename = parse_group_spec(name)  # group or group>file
+        name = f"{group}>{filename}" if filename else group
+        problem = group_name_problem(group)
         if problem:
-            messagebox.showwarning("Invalid newsgroup", f"{name!r} cannot be used: {problem}.")
+            messagebox.showwarning("Invalid newsgroup", f"{group!r} cannot be used: {problem}.")
             return
-        if is_binary_newsgroup(name):
+        if is_binary_newsgroup(group):
             messagebox.showwarning(
                 "Binary group",
-                f"Skipping {name} (looks like a binary newsgroup).",
+                f"Skipping {group} (looks like a binary newsgroup).",
             )
             self.group_var.set("")
             return
@@ -472,16 +483,18 @@ class UsenetArchiverGUI:
         except OSError as e:
             messagebox.showerror("Import failed", str(e))
             return
+        except UnicodeDecodeError as e:
+            messagebox.showerror("Import failed", f"{path} is not a UTF-8 text file ({e}).")
+            return
         existing = set(self._groups_from_listbox())
         added = 0
         skipped_bin = 0
         for line in lines:
-            # Accept bare group or group>filename — queue uses the group name only
-            # for display; filename override is CLI-oriented. Keep full line if
-            # it has no '>', else group part for the list.
-            group = line.split(">", 1)[0].strip()
+            # group or group>filename, as in a CLI groups file
+            group, filename = parse_group_spec(line)
             if not group:
                 continue
+            item = f"{group}>{filename}" if filename else group
             problem = group_name_problem(group)
             if problem:
                 self._append_log(f"Skipping invalid newsgroup name {group!r}: {problem}")
@@ -490,9 +503,9 @@ class UsenetArchiverGUI:
                 skipped_bin += 1
                 self._append_log(f"Skipping binary newsgroup {group}")
                 continue
-            if group not in existing:
-                self.groups_list.insert(tk.END, group)
-                existing.add(group)
+            if item not in existing:
+                self.groups_list.insert(tk.END, item)
+                existing.add(item)
                 added += 1
         self._update_job_preview()
         msg = f"Imported {added} newsgroup(s)."
@@ -519,9 +532,9 @@ class UsenetArchiverGUI:
         if not groups:
             self.job_preview_var.set("Output: (add at least one newsgroup)")
             return
-        sample = groups[0]
+        sample, filename = parse_group_spec(groups[0])
         try:
-            name = mbox_name_for(sample, None, start, end)
+            name = mbox_name_for(sample, filename, start, end)
         except ValueError:
             self.job_preview_var.set(f"Output: (invalid newsgroup name {sample!r})")
             return
@@ -532,10 +545,29 @@ class UsenetArchiverGUI:
             self.job_preview_var.set(
                 f"Output: {name}{extra}  ({start.date()} .. {end.date()}{note})"
             )
+        elif end:
+            self.job_preview_var.set(f"Output: {name}{extra}  (everything up to {end.date()})")
         else:
             self.job_preview_var.set(f"Output: {name}{extra}  (full group range)")
 
     # --- actions -----------------------------------------------------------
+
+    def _on_close(self) -> None:
+        """Window closed: when a pull runs, ask, stop it, and close once it
+        has stopped (whole articles stay in the mbox; the job is not
+        recorded as complete)."""
+        if self._active_tasks == 0:
+            self.root.destroy()
+            return
+        if not messagebox.askokcancel(
+            "Quit",
+            "A pull is running. Stop it and quit?\n"
+            "Articles written so far are kept; the job is not recorded as complete.",
+        ):
+            return
+        self._closing = True
+        self.stop_pull()
+        self._set_status("Stopping… the window closes when the pull has stopped")
 
     def stop_pull(self) -> None:
         self._stop_event.set()
@@ -557,7 +589,7 @@ class UsenetArchiverGUI:
         # Allow typing a group without pressing Add.
         pending = self.group_var.get().strip()
         if pending and pending not in groups:
-            if is_binary_newsgroup(pending):
+            if is_binary_newsgroup(parse_group_spec(pending)[0]):
                 raise ValueError(f"Skipping {pending} (looks like a binary newsgroup).")
             groups.append(pending)
         if not server:
@@ -569,7 +601,8 @@ class UsenetArchiverGUI:
         check_server_allowed(host)
         if not groups:
             raise ValueError("Add at least one newsgroup (or import a list).")
-        for g in groups:
+        for item in groups:
+            g = parse_group_spec(item)[0]
             problem = group_name_problem(g)
             if problem:
                 raise ValueError(f"Invalid newsgroup name {g!r}: {problem}.")
@@ -590,6 +623,13 @@ class UsenetArchiverGUI:
         out = self.output_var.get().strip() or str(Path.cwd())
         if not Path(out).is_dir():
             raise ValueError(f"Output directory does not exist: {out}")
+        # the pull runs in the output directory: a relative path means the
+        # directory the GUI was started in
+        password_file = self.password_file_var.get().strip() or None
+        if password_file:
+            password_file = os.path.abspath(os.path.expanduser(password_file))
+            if not os.path.isfile(password_file):
+                raise ValueError(f"Password file not found: {password_file}")
 
         start_s = self.start_var.get().strip() or None
         end_s = self.end_var.get().strip() or None
@@ -612,7 +652,7 @@ class UsenetArchiverGUI:
             "port": port,
             "username": self.user_var.get().strip() or None,
             "password": self.password_var.get() or None,
-            "password_file": self.password_file_var.get().strip() or None,
+            "password_file": password_file,
             "use_ssl": bool(self.ssl_var.get()),
             "groups": groups,
             "start_date": start_date,
@@ -666,18 +706,21 @@ class UsenetArchiverGUI:
 
             cwd = os.getcwd()
             written = []
-            incomplete = []  # groups that did not get every article
+            incomplete = []  # groups that failed or did not get every article
+            log = logging.getLogger("usenet_archiver")
+            # before the chdir below: relative paths (a password file) mean
+            # the directory the GUI was started in
+            endpoint = resolve_credentials(
+                server=opts["server"],
+                port=opts["port"],
+                username=opts["username"],
+                password=opts["password"],
+                password_file=opts["password_file"],
+                use_netrc=True,
+                use_ssl=opts["use_ssl"],
+            )
             try:
                 os.chdir(opts["output_dir"])
-                endpoint = resolve_credentials(
-                    server=opts["server"],
-                    port=opts["port"],
-                    username=opts["username"],
-                    password=opts["password"],
-                    password_file=opts["password_file"],
-                    use_netrc=True,
-                    use_ssl=opts["use_ssl"],
-                )
                 client = NNTPClient(
                     server=endpoint.host,
                     port=endpoint.port,
@@ -700,25 +743,24 @@ class UsenetArchiverGUI:
                         "verbose": False,
                         "timeout": opts["timeout"],
                     }
-                    for group in opts["groups"]:
+                    for item in opts["groups"]:
                         if self._stop_event.is_set() or gen != self._run_gen:
                             return "cancelled"
+                        group, filename = parse_group_spec(item)
                         if is_binary_newsgroup(group):
-                            logging.getLogger("usenet_archiver").info(
-                                "Skipping binary newsgroup %s", group
-                            )
+                            log.info("Skipping binary newsgroup %s", group)
                             continue
-                        mbox_filename = mbox_name_for(
-                            group, None, opts["start_date"], opts["end_date"]
-                        )
-                        if opts["start_date"] and opts["end_date"]:
-                            logging.getLogger("usenet_archiver").info(
-                                "Job window %s .. %s → %s",
-                                opts["start_date"].date(),
-                                opts["end_date"].date(),
-                                mbox_filename,
-                            )
                         try:
+                            mbox_filename = mbox_name_for(
+                                group, filename, opts["start_date"], opts["end_date"]
+                            )
+                            if opts["start_date"] and opts["end_date"]:
+                                log.info(
+                                    "Job window %s .. %s → %s",
+                                    opts["start_date"].date(),
+                                    opts["end_date"].date(),
+                                    mbox_filename,
+                                )
                             done = pull_group(
                                 client=client,
                                 group=group,
@@ -729,7 +771,7 @@ class UsenetArchiverGUI:
                                 dedup=True,
                                 plugins=[],
                                 completed_log="completed_newsgroups.log",
-                                logger=logging.getLogger("usenet_archiver"),
+                                logger=log,
                                 conn_kwargs=conn_kwargs,
                                 connections=opts["connections"],
                                 pipeline_depth=opts["pipeline_depth"],
@@ -738,11 +780,19 @@ class UsenetArchiverGUI:
                             )
                         except TerminatedBySignal:
                             return "cancelled"
+                        except Exception as e:
+                            # as the CLI does: on with the next group; the
+                            # connection may be out of step, the next group
+                            # opens a new one
+                            log.error("Failed group %s: %s", group, e)
+                            incomplete.append(group)
+                            client.close()
+                            continue
                         written.append(mbox_filename)
                         if not done:
                             incomplete.append(group)
                     if dry_run:
-                        return {"dry_run": True, "jobs": written}
+                        return {"dry_run": True, "jobs": written, "incomplete": incomplete}
                     if incomplete:
                         return {"incomplete": incomplete, "jobs": written}
                     return ", ".join(written) if written else None
@@ -754,36 +804,40 @@ class UsenetArchiverGUI:
             finally:
                 os.chdir(cwd)
 
-        def done(result):
+        def cleanup():
             self.progress.stop()
             if self._log_handler is not None:
                 logging.getLogger().removeHandler(self._log_handler)
                 self._log_handler = None
+
+        def done(result):
             if result == "cancelled":
                 self._set_status("Cancelled")
                 return
             if isinstance(result, dict) and result.get("dry_run"):
                 jobs = result.get("jobs") or []
+                failed = result.get("incomplete") or []
                 messagebox.showinfo(
                     "Dry run complete",
                     "No articles downloaded.\n"
                     f"Planned {len(jobs)} job(s).\n"
-                    "See the log for overview / dedup counts.",
+                    + (f"Failed: {', '.join(failed)}\n" if failed else "")
+                    + "See the log for overview / dedup counts.",
                 )
                 return
             if isinstance(result, dict) and result.get("incomplete"):
                 self._set_status("Incomplete")
                 messagebox.showwarning(
                     "Incomplete",
-                    "Not every article was fetched for: "
+                    "These groups failed or did not get every article: "
                     + ", ".join(result["incomplete"])
-                    + "\nThese jobs are not recorded as completed; see the log and run again.",
+                    + "\nThey are not recorded as completed; see the log and run again.",
                 )
                 return
             if result:
                 messagebox.showinfo("Done", f"Wrote {result}\nin {opts['output_dir']}")
 
-        self._run_in_background(label, work, done_fn=done)
+        self._run_in_background(label, work, done_fn=done, always_fn=cleanup)
 
 
 def main() -> None:

@@ -7,6 +7,7 @@ decoded for control flow, so ISO-8859-1 / KOI8-R / Shift_JIS bodies survive.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import socket
 import ssl
@@ -20,6 +21,14 @@ class NNTPTimeout(Exception):
 
 class NNTPError(Exception):
     """Raised for unexpected NNTP protocol responses."""
+
+
+class ConnectionClosed(NNTPError):
+    """The server closed the connection (EOF where a reply was due)."""
+
+
+class AuthError(NNTPError):
+    """The server refused the user name or the password."""
 
 
 class LineTooLong(NNTPError):
@@ -38,6 +47,11 @@ MAX_ARTICLE = 1 << 20  # bytes of article content (lines plus LF)
 # block) may take in all, however slowly the server keeps sending. The
 # socket timeout only covers a single read.
 DEFAULT_RESPONSE_TIMEOUT = 300
+
+# Pause before a new try after a connect failed (seconds, times the try
+# number): a provider often refuses a new connection while it has not yet
+# released the one just dropped.
+RECONNECT_DELAY = 1.0
 
 # Status prefix (not an NNTP code) for an article that was read but not
 # kept: over MAX_ARTICLE, or with a line over MAX_LINE. It is counted and
@@ -75,6 +89,20 @@ def _check_in_step(spec, resp: str) -> None:
         parts = resp.split()
         if len(parts) >= 2 and parts[1].isdigit() and int(parts[1]) != spec:
             raise NNTPError(f"ARTICLE {spec}: reply is for article {parts[1]}, stream out of step")
+
+
+def wildmat_match(name: str, wildmat: str) -> bool:
+    """Whether name matches an RFC 3977 wildmat: patterns with * ? [...],
+    separated by commas; one starting with ! excludes; the last pattern
+    that matches decides."""
+    result = False
+    for pattern in wildmat.split(","):
+        negate = pattern.startswith("!")
+        if negate:
+            pattern = pattern[1:]
+        if fnmatch.fnmatchcase(name, pattern):
+            result = not negate
+    return result
 
 
 class NNTPClient:
@@ -121,19 +149,12 @@ class NNTPClient:
             welcome = self._recv_status()
             if self.verbose:
                 print(f"Welcome: {welcome}")
+            # 200/201 = ready; 400/502 = refused (e.g. too many connections)
+            if not welcome.startswith(("200", "201")):
+                raise NNTPError(f"Server refused the connection: {welcome}")
 
-            if self.username and self.password:
-                self.send(f"AUTHINFO USER {self.username}")
-                user_resp = self._recv_status()
-                if self.verbose:
-                    print(f"USER response: {user_resp}")
-
-                self.send(f"AUTHINFO PASS {self.password}")
-                auth_resp = self._recv_status()
-                if self.verbose:
-                    print(f"PASS response: {auth_resp}")
-                if not auth_resp.startswith("281"):
-                    raise NNTPError(f"Authentication failed: {auth_resp}")
+            if self.username:
+                self._authenticate()
 
             self.send("MODE READER")
             mode_resp = self._recv_status()
@@ -147,6 +168,28 @@ class NNTPClient:
         except Exception as e:
             self.close()
             raise NNTPError(f"Connection error: {e}") from e
+        except BaseException:  # a signal (the CLI's TerminatedBySignal), Ctrl-C
+            self.close()
+            raise
+
+    def _authenticate(self) -> None:
+        """AUTHINFO USER, then PASS when the server asks for it (RFC 4643)."""
+        self.send(f"AUTHINFO USER {self.username}")
+        user_resp = self._recv_status()
+        if self.verbose:
+            print(f"USER response: {user_resp}")
+        if user_resp.startswith("281"):  # no password needed
+            return
+        if not user_resp.startswith("381"):
+            raise AuthError(f"Authentication failed: {user_resp}")
+        if not self.password:
+            raise AuthError(f"Authentication failed: the server asks for a password and none was given ({user_resp})")
+        self.send(f"AUTHINFO PASS {self.password}")
+        auth_resp = self._recv_status()
+        if self.verbose:
+            print(f"PASS response: {auth_resp}")
+        if not auth_resp.startswith("281"):
+            raise AuthError(f"Authentication failed: {auth_resp}")
 
     def reconnect(self) -> None:
         """Drop the connection and open a new one, selecting the current group again.
@@ -171,13 +214,14 @@ class NNTPClient:
         self._buf = bytearray()
 
     def quit(self) -> None:
+        """QUIT and close. Never raises for a connection that is already
+        gone (reset while idle, say): closing is all that is left to do."""
         try:
             if self.conn is not None:
                 self.send("QUIT")
-                try:
-                    self._recv_status()
-                except Exception:
-                    pass
+                self._recv_status()
+        except (OSError, NNTPError, NNTPTimeout):
+            pass
         finally:
             self.close()
 
@@ -188,7 +232,9 @@ class NNTPClient:
             # a name or a password with a line end would send a second command
             raise NNTPError("CR or LF inside an NNTP command")
         self.conn.settimeout(self.timeout)
-        self.conn.sendall(f"{command}\r\n".encode("ascii", errors="strict"))
+        # UTF-8 (RFC 3977 3.1, RFC 4643 for AUTHINFO); a name that came from
+        # the server undecodable (surrogateescape) goes back as it came
+        self.conn.sendall(f"{command}\r\n".encode("utf-8", errors="surrogateescape"))
 
     def _recv_raw(self, nbytes: int = 65536) -> bytes:
         if self.conn is None:
@@ -207,7 +253,7 @@ class NNTPClient:
                 raise NNTPTimeout(f"reply not complete after {self.response_timeout} s") from e
             raise NNTPTimeout("The read operation timed out") from e
         if not data:
-            raise NNTPError("Connection closed by server")
+            raise ConnectionClosed("Connection closed by server")
         return data
 
     def _readline(self) -> bytes:
@@ -307,24 +353,22 @@ class NNTPClient:
     # --- protocol helpers --------------------------------------------------
 
     def _probe_capabilities(self) -> Dict[str, List[str]]:
+        """CAPABILITIES; {} when the server does not know the command.
+
+        A timeout or a cut inside the reply raises: the stream is then out of
+        step, and the late reply would be read as the answer to GROUP.
+        """
         caps: Dict[str, List[str]] = {}
-        try:
-            self.send("CAPABILITIES")
-            resp = self._recv_status()
-            if not resp.startswith("101"):
-                return caps
-            for raw in self._read_multiline():
-                try:
-                    text = raw.decode("ascii", errors="replace").strip()
-                except Exception:
-                    continue
-                if not text:
-                    continue
-                parts = text.split()
-                name = parts[0].upper()
-                caps[name] = parts[1:]
-        except Exception as e:
-            self.logger.debug("CAPABILITIES probe failed: %s", e)
+        self.send("CAPABILITIES")
+        resp = self._recv_status()
+        if not resp.startswith("101"):
+            return caps
+        for raw in self._read_multiline():
+            text = raw.decode("ascii", errors="replace").strip()
+            if not text:
+                continue
+            parts = text.split()
+            caps[parts[0].upper()] = parts[1:]
         return caps
 
     def has_capability(self, name: str) -> bool:
@@ -448,24 +492,31 @@ class NNTPClient:
             except Exception:
                 continue
             parts = line.split(" ", 1)
-            if len(parts) == 2 and parts[0].isdigit():
-                result.append((int(parts[0]), parts[1].strip()))
+            if parts[0].strip().isdigit():
+                # a number alone: the value is empty (some servers trim the
+                # space); the article is there all the same
+                result.append((int(parts[0].strip()), parts[1].strip() if len(parts) == 2 else ""))
         return result
 
     def list_active(self, wildmat: Optional[str] = None) -> List[str]:
-        """LIST ACTIVE [wildmat], falling back to LIST. Returns group names."""
+        """LIST ACTIVE [wildmat], falling back to LIST. Returns group names.
+
+        A bare LIST has no wildmat: its list is filtered here instead.
+        """
         if wildmat:
             cmd = f"LIST ACTIVE {wildmat}"
         else:
             cmd = "LIST ACTIVE"
         self.send(cmd)
         resp = self._recv_status()
+        filter_here = False
         if not resp.startswith("215"):
-            # Fall back to bare LIST
+            # Fall back to bare LIST (RFC 977 servers)
             self.send("LIST")
             resp = self._recv_status()
             if not resp.startswith("215"):
                 raise NNTPError(f"LIST failed: {resp}")
+            filter_here = bool(wildmat)
         names: List[str] = []
         for raw in self._read_multiline():
             try:
@@ -475,6 +526,8 @@ class NNTPClient:
             if not text:
                 continue
             name = text.split()[0]
+            if filter_here and not wildmat_match(name, wildmat):
+                continue
             names.append(name)
         return names
 

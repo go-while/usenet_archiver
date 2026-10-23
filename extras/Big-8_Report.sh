@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Report of active Big-8 hierarchy directories by immediate subtree size (tradspool layout).
 # Writes ~/TIMESTAMP.mostarticles_big8.txt — portable paths; no web root required.
+# SPOOL may be set in the environment (default /var/spool/news/articles).
 
+SPOOL="${SPOOL:-/var/spool/news/articles}"
+SPOOL="${SPOOL%/}"
 NOW=$(date '+%F_%H:%M:%S')
 
-BIG8_PATTERN='/var/spool/news/articles/comp|/var/spool/news/articles/news|/var/spool/news/articles/misc|/var/spool/news/articles/sci|/var/spool/news/articles/humanities|/var/spool/news/articles/rec|/var/spool/news/articles/soc|/var/spool/news/articles/talk'
+# a whole hierarchy name: comp and comp/lang, not compx or socal
+BIG8='(comp|humanities|misc|news|rec|sci|soc|talk)'
+PATTERN="^[0-9]+ ${SPOOL}/${BIG8}(/|$)"
 
 echo "running big8 report"
 echo
 echo "${NOW}" >"${HOME}/${NOW}.mostarticles_big8.txt"
-find /var/spool/news/articles -xdev -type d -exec sh -c '
-    echo "$(find "$0" -mindepth 1 -maxdepth 1 -printf x | wc -c) $0"' {} \; | sort -rn | grep -E "${BIG8_PATTERN}" >>"${HOME}/${NOW}.mostarticles_big8.txt"
+find "${SPOOL}" -xdev -type d -exec sh -c '
+    echo "$(find "$0" -mindepth 1 -maxdepth 1 -printf x | wc -c) $0"' {} \; | sort -rn | grep -E "${PATTERN}" >>"${HOME}/${NOW}.mostarticles_big8.txt"

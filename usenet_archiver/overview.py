@@ -11,6 +11,7 @@ little next to fetching the articles.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -106,7 +107,12 @@ def _date_only(dt: Optional[datetime]):
     if dt is None:
         return None
     if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc)
+        try:
+            dt = dt.astimezone(timezone.utc)
+        except OverflowError:
+            # e.g. 9999-12-31 23:00 -0200, past datetime's range in UTC: its
+            # own date is at most a day off
+            pass
     return dt.date()
 
 
@@ -120,22 +126,30 @@ def fetch_with_reconnect(client, start_id: int, end_id: int, tries: int = OVERVI
     """fetch_overview_chunk, retried on a new connection after any failure.
 
     After a timeout or a cut the old connection is out of step, so it is never
-    read again: client.reconnect() opens a new one and selects the group. The
-    last failure is raised.
+    read again: client.reconnect() opens a new one and selects the group. A
+    failed reconnect counts as a try. The last failure is raised.
     """
+    from . import nntp
     from .nntp import NNTPError, NNTPTimeout
 
+    need_reconnect = False
     for attempt in range(1, tries + 1):
+        connecting = need_reconnect
         try:
+            if need_reconnect:
+                client.reconnect()
+                need_reconnect = connecting = False
             return fetch_overview_chunk(client, start_id, end_id)
         except (NNTPTimeout, NNTPError, OSError) as e:
+            need_reconnect = True
             if attempt == tries:
                 raise
             logger.warning(
                 "Overview %s-%s failed (%s); reconnecting, try %s of %s",
                 start_id, end_id, e, attempt + 1, tries,
             )
-            client.reconnect()
+            if connecting:  # a refused connect: give the server a moment
+                time.sleep(nntp.RECONNECT_DELAY * attempt)
     raise AssertionError("unreachable")
 
 
@@ -166,6 +180,8 @@ def find_articles_in_date_range(
     start_date: Optional[datetime],
     end_date: Optional[datetime],
     chunk_size: int = 10000,
+    seen: Optional[List[int]] = None,
+    check: Optional[Callable[[], None]] = None,
 ) -> List[OverviewRow]:
     """Return overview rows for first..last whose Date falls in
     [start_date, end_date] (whole UTC days, inclusive), sorted by number.
@@ -173,7 +189,16 @@ def find_articles_in_date_range(
     Rows without a usable Date are kept. With no dates, every row is
     returned. The whole range is scanned, so neither out-of-order dates nor
     gaps in the article numbers can hide an article in the window.
+
+    seen, a list, gets the number of rows the server listed, in the window
+    or not: none at all for a range that has articles means the overview is
+    broken (see overview_is_missing).
+
+    check, when given, is called before each chunk; it raises to stop the
+    scan (the GUI's Stop).
     """
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1")
     if first > last:
         return []
 
@@ -183,7 +208,7 @@ def find_articles_in_date_range(
     start_d = start_date.date() if start_date else None
     end_d = end_date.date() if end_date else None
     logger.info("Overview scan: %s-%s (chunk=%s)", first, last, chunk_size)
-    return list(_scan_chunks(fetch, first, last, chunk_size, start_d, end_d))
+    return list(_scan_chunks(fetch, first, last, chunk_size, start_d, end_d, seen, check))
 
 
 def _scan_chunks(
@@ -193,13 +218,19 @@ def _scan_chunks(
     chunk_size: int,
     start_d,
     end_d,
+    seen: Optional[List[int]] = None,
+    check: Optional[Callable[[], None]] = None,
 ) -> List[OverviewRow]:
     matched: List[OverviewRow] = []
     cursor = start_id
     while cursor <= end_id:
+        if check is not None:
+            check()
         chunk_end = min(end_id, cursor + chunk_size - 1)
         # A failed chunk raises: skipping it would lose its articles silently.
         rows = fetch(cursor, chunk_end)
+        if seen is not None:
+            seen.append(len(rows))
         for row in rows:
             if start_d is None and end_d is None:
                 matched.append(row)
@@ -221,6 +252,25 @@ def _scan_chunks(
         cursor = chunk_end + 1
     matched.sort(key=lambda r: r.article_id)
     return matched
+
+
+def overview_is_missing(client, first: int, last: int) -> Optional[int]:
+    """After an overview scan of first..last that listed no article: the
+    number of an article the server has all the same (its overview database
+    is then broken, and the job is not complete), else None.
+
+    STAT asks for the first, the middle and the last number, the ones GROUP
+    reported. 423/430 means none there; any other answer counts as "may be
+    there", since an empty overview cannot then be confirmed.
+    """
+    for number in sorted({first, (first + last) // 2, last}):
+        _n, resp = client.stat(number)
+        if resp.startswith("223"):
+            return number
+        if not resp.startswith(("423", "430")):
+            logger.warning("STAT %s: %s; cannot confirm that the group is empty", number, resp)
+            return number
+    return None
 
 
 def filter_rows_by_dedup(rows: Sequence[OverviewRow], seen_ids: set) -> List[OverviewRow]:

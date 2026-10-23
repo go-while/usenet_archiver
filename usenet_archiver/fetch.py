@@ -10,6 +10,7 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from . import nntp
 from .nntp import NNTPClient, NNTPError, NNTPTimeout, is_missing_article, is_too_big
 from .overview import OverviewRow
 
@@ -17,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 # Sentinel meaning a worker has finished.
 _WORKER_DONE = object()
+
+# Tries per batch of articles; a failed connect counts as a try.
+TRIES = 3
 
 
 def _chunks(items: Sequence, size: int):
@@ -98,21 +102,26 @@ def _worker(
         c = _make_client(conn_kwargs)
         shared.register(worker_id, c)
         c.connect()
-        c.group(group)
+        try:
+            c.group(group)
+        except BaseException:
+            c.close()
+            raise
         return c
 
     try:
-        client = new_client()
-
         for batch in _chunks(list(rows), max(1, pipeline_depth)):
             if stopped():
                 break
             ids = [r.article_id for r in batch]
-            retries = 3
-            while retries > 0:
+            for attempt in range(1, TRIES + 1):
                 if stopped():
                     break
+                connecting = client is None
                 try:
+                    if client is None:
+                        client = new_client()
+                        connecting = False
                     results = client.articles_pipelined(ids)
                     for row, (_spec, content, resp) in zip(batch, results):
                         if not _put(out_queue, (row, content, resp), abort):
@@ -122,24 +131,30 @@ def _worker(
                 except (NNTPTimeout, NNTPError, OSError) as e:
                     if abort.is_set():
                         return
-                    retries -= 1
                     logger.warning(
-                        "worker %s pipeline failed (%s); retries left %s",
-                        worker_id,
-                        e,
-                        retries,
+                        "worker %s %s failed (%s); try %s of %s",
+                        worker_id, "connect" if connecting else "pipeline", e, attempt, TRIES,
                     )
-                    if retries == 0:
-                        for row in batch:
-                            if not _put(out_queue, (row, b"", f"error: {e}"), abort):
-                                return
-                            emitted += 1
-                    # The stream may be out of step (a late or half reply):
-                    # never read this connection again, not even for QUIT.
-                    client.close()
-                    client = new_client()
-                    if retries == 0:
-                        break
+                    if client is not None:
+                        # The stream may be out of step (a late or half
+                        # reply): never read this connection again, not
+                        # even for QUIT.
+                        client.close()
+                        client = None
+                    if attempt < TRIES:
+                        # a refused connect: give the server a moment
+                        if connecting and abort.wait(nntp.RECONNECT_DELAY * attempt):
+                            return
+                        continue
+                    # out of tries: this batch fails; when not even a
+                    # connection could be had, so does the rest of the shard
+                    failed = rows[emitted:] if connecting else batch
+                    for row in failed:
+                        if not _put(out_queue, (row, b"", f"error: {e}"), abort):
+                            return
+                        emitted += 1
+                    if connecting:
+                        return
     except Exception as e:
         if not abort.is_set():
             logger.error("worker %s fatal: %s", worker_id, e)

@@ -41,8 +41,9 @@ _MONTHS = (
 
 # The last header line of every article this writer stores. mbox2nntp
 # (github.com/go-while/mbox2nntp) takes it as "this mbox is mboxrd": it takes
-# one ">" off quoted body lines (see needs_quote) and drops the field before
-# sending. Without it mbox2nntp sends body lines as stored.
+# one ">" off quoted lines, header and body (see needs_quote; mbox2nntp >=
+# v0.3.3, older versions send a quoted header line with its ">"), and drops
+# the field before sending. Without it mbox2nntp sends the lines as stored.
 FORMAT_FIELD = b"X-Mbox2nntp-Format: mboxrd"
 
 # Envelope date for an article whose Date is missing, does not parse or is
@@ -264,6 +265,25 @@ class MboxLocked(OSError):
     """Another process is writing this mbox."""
 
 
+# mbox2nntp's limit (maxArticleSize) on the body of an article as stored in
+# the mbox: the body lines with their line ends and the mboxrd quotes, and
+# the empty line after them. At this size or more mbox2nntp drops the
+# article (counted 437), so it is not written.
+MAX_STORED_BODY = 1 << 20
+
+
+class ArticleTooBig(ValueError):
+    """The article's body as stored would be too big for mbox2nntp to import."""
+
+
+def stored_body_size(article: bytes) -> int:
+    """The size mbox2nntp counts for the article's body once stored: each
+    body line with its LF and, when quoted, one more ">", plus the empty
+    line before the next envelope."""
+    _head, body = split_article(article)
+    return sum(len(line) + 1 + needs_quote(line) for line in body) + 1
+
+
 def journal_path(path: str) -> str:
     """The journal of an mbox being written: the size of its whole messages."""
     return path + JOURNAL_SUFFIX
@@ -429,6 +449,9 @@ class MboxWriter:
         same the index reads back from the mbox; message_id (e.g. from OVER)
         is not used for it.
         """
+        size = stored_body_size(article)
+        if size > MAX_STORED_BODY:
+            raise ArticleTooBig(f"body {size} bytes as stored, mbox2nntp takes at most {MAX_STORED_BODY}")
         mid = article_key(article)
         if dt is None:
             dt = date_from_article(article)

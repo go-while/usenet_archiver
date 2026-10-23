@@ -6,18 +6,31 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import signal
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Callable, List, Optional, Tuple
 
 from .creds import resolve_credentials
 from .fetch import fetch_articles_parallel
-from .mboxout import MboxWriter
-from .nntp import DEFAULT_RESPONSE_TIMEOUT, MAX_ARTICLE, NNTPClient, NNTPError, is_missing_article, is_too_big
-from .overview import find_articles_in_date_range
-from .plugins import RawArticle, apply_plugins, parse_plugin_spec
+from .mboxout import ArticleTooBig, MboxWriter
+from . import nntp
+from .nntp import (
+    DEFAULT_RESPONSE_TIMEOUT,
+    MAX_ARTICLE,
+    AuthError,
+    ConnectionClosed,
+    NNTPClient,
+    NNTPError,
+    NNTPTimeout,
+    is_missing_article,
+    is_too_big,
+)
+from .overview import find_articles_in_date_range, overview_is_missing
+from .plugins import RawArticle, apply_plugins, parse_plugin_spec, removes_message_id
 
 # Global so SIGTERM can close an open writer / stop workers.
 _ACTIVE_WRITER: Optional[MboxWriter] = None
@@ -25,8 +38,21 @@ _STOP_EVENT: Optional[threading.Event] = None
 _TERMINATED = False
 
 
-class TerminatedBySignal(Exception):
-    """Raised when SIGTERM is received during a pull."""
+class TerminatedBySignal(BaseException):
+    """Raised when SIGTERM is received during a pull.
+
+    A BaseException, like KeyboardInterrupt: the "except Exception" blocks on
+    the way (connect, the capabilities probe, a failed group) must not take
+    it for an error and go on.
+    """
+
+
+def _check_stop() -> None:
+    """Raise TerminatedBySignal once a stop was asked for: SIGTERM, or Stop
+    in the GUI (which sets _TERMINATED and the stop event from its thread,
+    where nothing can be raised in the pull)."""
+    if _TERMINATED or (_STOP_EVENT is not None and _STOP_EVENT.is_set()):
+        raise TerminatedBySignal("stopped")
 
 
 def _handle_sigterm(signum, frame):
@@ -66,7 +92,7 @@ def collect_group_specs(newsgroups: Optional[List[str]], groups_file: Optional[s
         if g:
             specs.append((g, f))
     if groups_file:
-        with open(groups_file, encoding="utf-8") as fh:
+        with open(groups_file, encoding="utf-8-sig") as fh:  # -sig: a BOM is dropped
             for line in fh:
                 line = line.strip()
                 if not line or line.startswith("#"):
@@ -94,7 +120,9 @@ def filter_binary_groups(
 
 
 def normalize_date_range(start_date, end_date, verbose: bool = False, today=None):
-    """Fill missing bounds: lone start → end=today UTC; lone end → start=1990-01-01.
+    """Fill a missing end: lone start → end=today UTC. A lone end stays
+    alone: everything up to it, however old (Usenet began in 1979, and
+    broken dates go further back).
 
     An open-ended ``start`` with no ``end`` resolves ``end`` to *today* (UTC).
     Running the same "since DATE" job on a later calendar day therefore yields a
@@ -112,10 +140,8 @@ def normalize_date_range(start_date, end_date, verbose: bool = False, today=None
         end_date = datetime.combine(today, datetime.min.time())
         if verbose:
             print(f"Note: --end-date omitted; using end date {end_date.date()} (UTC).")
-    elif end_date is not None and start_date is None:
-        start_date = datetime(1990, 1, 1)
-        if verbose:
-            print(f"Note: --start-date omitted; using start date {start_date.date()}.")
+    elif end_date is not None and start_date is None and verbose:
+        print("Note: --start-date omitted; no lower bound.")
     if start_date is not None and end_date is not None and start_date > end_date:
         raise ValueError("start date must be on or before end date")
     return start_date, end_date
@@ -126,7 +152,8 @@ def mbox_name_for(group: str, filename: Optional[str], start_date, end_date) -> 
 
     Example: start=2025-07-01 with no end on July 10 →
     ``group-20250701-20250710.mbox``; the same request on July 11 →
-    ``group-20250701-20250711.mbox`` (a separate pull).
+    ``group-20250701-20250711.mbox`` (a separate pull). An end alone →
+    ``group-until-20250710.mbox``.
     """
     if filename:
         return filename
@@ -137,6 +164,13 @@ def mbox_name_for(group: str, filename: Optional[str], start_date, end_date) -> 
         raise ValueError(f"invalid newsgroup name {group!r}: {problem}")
     if start_date is not None and end_date is not None:
         return f"{group}-{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}.mbox"
+    if end_date is not None:
+        name = f"{group}-until-{end_date.strftime('%Y%m%d')}.mbox"
+        # version 2.0.1 started a lone end at 1990-01-01: keep using its mbox
+        old = f"{group}-19900101-{end_date.strftime('%Y%m%d')}.mbox"
+        if not os.path.exists(name) and os.path.exists(old):
+            return old
+        return name
     return f"{group}.mbox"
 
 
@@ -178,16 +212,90 @@ def normalize_message_id(mid: str) -> str:
     return mid
 
 
-def mark_completed(completed_log: str, mbox_filename: str, logger: logging.Logger) -> None:
-    """Append ``mbox_filename`` to the completed-jobs log after a successful pull."""
+def mark_completed(
+    completed_log: str, mbox_filename: str, logger: logging.Logger, group: Optional[str] = None
+) -> None:
+    """Append the job to the completed-jobs log after a successful pull.
+
+    One line per job: ``mbox<TAB>group``. The group is part of the job:
+    several groups can share an mbox (``-g a>x.mbox -g b>x.mbox``), and each
+    is complete on its own.
+    """
+    line = f"{mbox_filename}\t{group}" if group else mbox_filename
     try:
         with open(completed_log, "a", encoding="utf-8") as fh:
-            fh.write(f"{mbox_filename}\n")
+            fh.write(f"{line}\n")
             fh.flush()
             os.fsync(fh.fileno())
-        logger.info("Recorded successful pull of %s in %s", mbox_filename, completed_log)
+        logger.info("Recorded successful pull of %s (%s) in %s", mbox_filename, group, completed_log)
     except OSError as e:
         logger.error("Failed to update %s: %s", completed_log, e)
+
+
+def is_completed(completed_log: str, mbox_filename: str, group: str) -> bool:
+    """Whether completed_log lists this job: the line ``mbox<TAB>group``.
+
+    A line with the mbox name alone (written before the group was recorded)
+    counts only for the group's own default mbox, ``group.mbox`` or
+    ``group-YYYYMMDD-YYYYMMDD.mbox``: a chosen name may be shared by several
+    groups, and the line does not say which of them was complete.
+    """
+    if not os.path.exists(completed_log):
+        return False
+    default = mbox_filename == f"{group}.mbox" or re.fullmatch(
+        re.escape(group) + r"-\d{8}-\d{8}\.mbox", mbox_filename
+    )
+    with open(completed_log, encoding="utf-8", errors="surrogateescape") as fh:
+        for line in fh:
+            line = line.rstrip("\r\n")
+            if "\t" in line:
+                if line.rsplit("\t", 1) == [mbox_filename, group]:
+                    return True
+            elif default and line.strip() == mbox_filename:
+                return True
+    return False
+
+
+def _record_completed(completed_log: str, mbox_filename: str, logger: logging.Logger, group: str) -> None:
+    """mark_completed, unless a SIGTERM came in: a stopped run records nothing."""
+    if _TERMINATED:
+        raise TerminatedBySignal("terminated")
+    mark_completed(completed_log, mbox_filename, logger, group)
+
+
+# Tries for GROUP on the main connection when it was lost or a new one is refused.
+GROUP_TRIES = 3
+
+
+def _select_group(client: NNTPClient, group: str, logger: logging.Logger):
+    """GROUP on the main connection, on a new one when needed.
+
+    The connection may have been closed while it sat idle (the mbox of the
+    group before being indexed, a group with nothing to fetch), and a new
+    one may be refused for a moment while the fetch connections of the
+    group before are released. Both are tried again. Any answer to GROUP
+    (411 no such group) and a refused login are not.
+    """
+    for attempt in range(1, GROUP_TRIES + 1):
+        connecting = client.conn is None
+        try:
+            if connecting:
+                client.connect()
+                connecting = False
+            return client.group(group)
+        except (NNTPError, NNTPTimeout, OSError) as e:
+            lost = isinstance(e, (ConnectionClosed, NNTPTimeout, OSError))
+            if isinstance(e, AuthError) or not (connecting or lost) or attempt == GROUP_TRIES:
+                raise
+            logger.warning(
+                "%s for %s (%s); new connection, try %s of %s",
+                "Connect failed" if connecting else "Connection lost",
+                group, e, attempt + 1, GROUP_TRIES,
+            )
+            client.close()
+            if connecting:  # refused: give the server a moment
+                time.sleep(nntp.RECONNECT_DELAY * attempt)
+    raise AssertionError("unreachable")
 
 
 def pull_group(
@@ -219,37 +327,37 @@ def pull_group(
     # dated windows.
     if skip_completed:
         try:
-            if os.path.exists(completed_log):
-                with open(completed_log, encoding="utf-8") as fh:
-                    done = {line.strip() for line in fh if line.strip()}
-                if mbox_filename in done and os.path.exists(mbox_filename):
+            if is_completed(completed_log, mbox_filename, group):
+                if os.path.exists(mbox_filename):
                     logger.info(
-                        "Skipping %s (already in %s; disable skip-completed to catch up)",
+                        "Skipping %s → %s (already in %s; disable skip-completed to catch up)",
+                        group,
                         mbox_filename,
                         completed_log,
                     )
                     return True
-                if mbox_filename in done and not os.path.exists(mbox_filename):
-                    logger.info(
-                        "%s is listed in %s but the mbox is missing; pulling again",
-                        mbox_filename,
-                        completed_log,
-                    )
+                logger.info(
+                    "%s → %s is listed in %s but the mbox is missing; pulling again",
+                    group,
+                    mbox_filename,
+                    completed_log,
+                )
         except OSError as e:
             logger.warning("Could not read %s: %s", completed_log, e)
 
-    if client.conn is None:  # closed for the fetch of the group before
-        client.connect()
-    first, last, group_resp = client.group(group)
+    # the connection is closed during each fetch, and may have been lost
+    # while idle
+    first, last, group_resp = _select_group(client, group, logger)
     logger.info("GROUP %s: %s (first=%s last=%s)", group, group_resp, first, last)
     if first == 0 and last == 0:
         if dry_run:
             logger.info("DRY-RUN: group %s is empty (would write %s)", group, mbox_filename)
             return True
         logger.info("Group %s is empty", group)
-        mark_completed(completed_log, mbox_filename, logger)
+        _record_completed(completed_log, mbox_filename, logger, group)
         return True
 
+    seen: List[int] = []
     rows = find_articles_in_date_range(
         client,
         first,
@@ -257,13 +365,28 @@ def pull_group(
         start_date,
         end_date,
         chunk_size=overview_chunk,
+        seen=seen,
+        check=_check_stop,
     )
+    _check_stop()
     overview_count = len(rows)
     logger.info("Overview matched %s articles for %s", overview_count, group)
+    if not rows and not sum(seen) and first <= last:
+        # no row at all for a range GROUP reported: either the articles are
+        # gone, or the server's overview database lost them
+        present = overview_is_missing(client, first, last)
+        if present is not None:
+            logger.error(
+                "The overview of %s lists no articles, but the server has article %s: "
+                "its overview is incomplete; not adding %s to %s",
+                group, present, mbox_filename, completed_log,
+            )
+            return False
 
     # Index existing mbox for dedup without opening for append (dry-run must not
     # create or modify the mbox / completed log).
     writer = MboxWriter(mbox_filename, dedup=dedup, flush_every=100)
+    _check_stop()  # indexing a large mbox takes a while
     if dedup:
         rows = [r for r in rows if not writer.has_message_id(r.message_id)]
         logger.info("After dedup filter: %s articles to fetch", len(rows))
@@ -289,7 +412,7 @@ def pull_group(
 
     if not rows:
         logger.info("Nothing to fetch for %s", group)
-        mark_completed(completed_log, mbox_filename, logger)
+        _record_completed(completed_log, mbox_filename, logger, group)
         return True
 
     _ACTIVE_WRITER = writer
@@ -324,7 +447,14 @@ def pull_group(
                     articles_skipped += 1
                     return
                 body = msg.to_bytes()
-            if writer.write(body, dt=row.date, message_id=row.message_id or None):
+            try:
+                written = writer.write(body, dt=row.date, message_id=row.message_id or None)
+            except ArticleTooBig as e:
+                # mbox2nntp could not import it: skipped and counted, like one over the fetch limit
+                articles_too_big += 1
+                logger.warning("Article %s: %s; skipped", row.article_id, e)
+                return
+            if written:
                 articles_saved += 1
             else:
                 articles_skipped += 1
@@ -398,7 +528,7 @@ def pull_group(
     writer.close()
     if not clean:
         return False
-    mark_completed(completed_log, mbox_filename, logger)
+    _record_completed(completed_log, mbox_filename, logger, group)
     return True
 
 
@@ -514,7 +644,7 @@ def build_parser() -> argparse.ArgumentParser:
     conn = _connection_parser()
     parser = argparse.ArgumentParser(
         prog="usenet-archiver -c",
-        description="NNTP text archiver CLI (use subcommands). GUI is the default without -c.",
+        description="NNTP text archiver CLI (use subcommands). Without arguments, usenet-archiver launches the GUI.",
         epilog=(
             "Examples:\n"
             "  usenet-archiver -c pull -s news.example.com -u alice -g news.groups -n\n"
@@ -522,8 +652,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  usenet-archiver -c get '<mid@example.com>'\n"
             "  usenet-archiver -c post -g misc.test < msg.eml\n"
             "\n"
-            "Without -c, usenet-archiver launches the GUI. "
-            "Top-level --help / --version work without -c.\n"
+            "Without any argument, usenet-archiver launches the GUI; any argument means the CLI\n"
+            "(-c may be left out). Top-level --help / --version work without -c.\n"
             "Short and long forms are interchangeable (e.g. -s/--server, -u/--user)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -570,7 +700,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--end",
         "--end-date",
         dest="end_date",
-        help="End date (YYYY-MM-DD). May be used alone; start defaults to 1990-01-01.",
+        help="End date (YYYY-MM-DD). May be used alone: everything up to that day.",
     )
     pull.add_argument(
         "--overview-chunk",
@@ -712,13 +842,72 @@ def _parse_plugins(specs: List[str], parser: argparse.ArgumentParser) -> list:
     return plugins
 
 
+def _pull_arguments(args, parser: argparse.ArgumentParser, logger: logging.Logger):
+    """Check pull's arguments (parser.error, exit 2, on a bad one); returns
+    (start_date, end_date, plugins, group_specs)."""
+    if args.connections < 1:
+        parser.error("--connections must be >= 1")
+    if args.pipeline_depth < 1:
+        parser.error("--pipeline-depth must be >= 1")
+    if args.overview_chunk < 1:
+        parser.error("--overview-chunk must be >= 1")
+    if args.connections > 99:
+        sys.stderr.write(
+            f"Warning: --connections {args.connections} is high; "
+            "check your provider's concurrent-connection limit.\n"
+        )
+
+    try:
+        start_date = parse_date(args.start_date) if args.start_date else None
+    except ValueError as e:
+        parser.error(f"--start {args.start_date}: {e}")
+    try:
+        end_date = parse_date(args.end_date) if args.end_date else None
+    except ValueError as e:
+        parser.error(f"--end {args.end_date}: {e}")
+    try:
+        start_date, end_date = normalize_date_range(start_date, end_date, verbose=args.verbose)
+    except ValueError as e:
+        parser.error(str(e).replace("start date", "--start-date").replace("end date", "--end-date"))
+
+    plugins = _parse_plugins(args.plugin, parser)
+    if args.dedup:
+        for spec, plugin in zip(args.plugin, plugins):
+            if removes_message_id(plugin):
+                parser.error(
+                    f"--plugin {spec} removes Message-ID, by which the archive recognises "
+                    "an article: different articles would be skipped as duplicates. "
+                    "Keep Message-ID, or pull with --no-dedup"
+                )
+    try:
+        group_specs = collect_group_specs(args.newsgroups, args.groups_file)
+    except (OSError, UnicodeDecodeError) as e:
+        parser.error(f"cannot read the groups file {args.groups_file}: {e}")
+    group_specs = filter_binary_groups(group_specs, logger=logger)
+    if not group_specs:
+        parser.error(
+            "pull requires -g/--newsgroup and/or -f/--groups-file "
+            "(after skipping binary groups)"
+        )
+    return start_date, end_date, plugins, group_specs
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    global _STOP_EVENT
+    try:
+        return _main(argv)
+    except TerminatedBySignal:  # wherever it came: connecting, resolving, a group
+        sys.stderr.write("Terminated by signal\n")
+        return 4
+
+
+def _main(argv: Optional[List[str]]) -> int:
+    global _STOP_EVENT, _TERMINATED
 
     parser = build_parser()
     args = parser.parse_args(argv)
 
     _STOP_EVENT = threading.Event()
+    _TERMINATED = False
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
     try:
@@ -743,6 +932,19 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     logger = setup_logging(args.verbose, args.syslog)
 
+    # Every argument is checked before connecting: a usage error is exit 2,
+    # without a login on the server.
+    if args.command == "get":
+        try:
+            message_id = normalize_message_id(args.message_id)
+        except ValueError as e:
+            parser.error(str(e))
+    elif args.command == "post":
+        plugins = _parse_plugins(args.plugin, parser)
+        groups = [g for g, _ in collect_group_specs(args.newsgroups, None)]
+    elif args.command == "pull":
+        start_date, end_date, plugins, group_specs = _pull_arguments(args, parser, logger)
+
     try:
         client = _connect_client(args, endpoint)
     except (NNTPError, OSError) as e:
@@ -754,51 +956,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             return cmd_list_groups(client, args.wildmat)
 
         if args.command == "get":
-            try:
-                return cmd_get_message(client, args.message_id)
-            except ValueError as e:
-                sys.stderr.write(f"{e}\n")
-                return 4
+            return cmd_get_message(client, message_id)
 
         if args.command == "post":
-            plugins = _parse_plugins(args.plugin, parser)
-            group_specs = collect_group_specs(args.newsgroups, None)
-            groups = [g for g, _ in group_specs]
             return cmd_post(client, groups, plugins)
 
         # pull
-        if args.connections < 1:
-            parser.error("--connections must be >= 1")
-        if args.pipeline_depth < 1:
-            parser.error("--pipeline-depth must be >= 1")
-        if args.connections > 99:
-            sys.stderr.write(
-                f"Warning: --connections {args.connections} is high; "
-                "check your provider's concurrent-connection limit.\n"
-            )
-
-        start_date = parse_date(args.start_date) if args.start_date else None
-        end_date = parse_date(args.end_date) if args.end_date else None
-        try:
-            start_date, end_date = normalize_date_range(
-                start_date, end_date, verbose=args.verbose
-            )
-        except ValueError as e:
-            parser.error(
-                str(e)
-                .replace("start date", "--start-date")
-                .replace("end date", "--end-date")
-            )
-
-        plugins = _parse_plugins(args.plugin, parser)
-        group_specs = collect_group_specs(args.newsgroups, args.groups_file)
-        group_specs = filter_binary_groups(group_specs, logger=logger)
-        if not group_specs:
-            parser.error(
-                "pull requires -g/--newsgroup and/or -f/--groups-file "
-                "(after skipping binary groups)"
-            )
-
         completed_log = "completed_newsgroups.log"
         incomplete = 0  # groups that failed or did not get every article
         from .policy import group_name_problem
@@ -817,6 +980,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "response_timeout": args.response_timeout,
             }
             try:
+                if _TERMINATED:  # a SIGTERM no handler raised on the way
+                    raise TerminatedBySignal("terminated")
                 # the name goes into commands and file names: check it first
                 problem = group_name_problem(group)
                 if problem:
@@ -871,7 +1036,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     except TerminatedBySignal:
         return 4
-    except NNTPError as e:
+    except (NNTPError, NNTPTimeout, OSError) as e:  # a timeout or a reset too
         sys.stderr.write(f"NNTP error: {e}\n")
         return 4
     finally:

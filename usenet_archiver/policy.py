@@ -65,12 +65,14 @@ def group_name_problem(group: str) -> Optional[str]:
     name in the working directory. RFC 3977 names are printable, without
     whitespace; "/" or "\\" would put the mbox in another directory, a
     leading "." or ".." would hide it or leave the directory. UTF-8 names
-    are allowed.
+    are allowed, but not invisible characters such as a BOM or a no-break
+    space. A byte that is not UTF-8 (decoded with surrogateescape, as
+    list-groups does) is allowed and sent back as it came.
     """
     if not group:
         return "empty"
-    if any(ord(c) < 0x21 or ord(c) == 0x7F for c in group):
-        return "whitespace or a control character"
+    if any(ord(c) < 0x21 or not (c.isprintable() or 0xDC80 <= ord(c) <= 0xDCFF) for c in group):
+        return "whitespace, a control character or an invisible character"
     if "/" in group or "\\" in group:
         return "a / or \\"
     if group.startswith(".") or ".." in group:
@@ -106,7 +108,7 @@ def filter_group_specs(
 def read_groups_file(path: str) -> List[str]:
     """Read one newsgroup name per line (# comments and blanks ignored)."""
     groups: List[str] = []
-    with open(path, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8-sig") as fh:  # -sig: a BOM is dropped
         for line in fh:
             line = line.strip()
             if not line or line.startswith("#"):
