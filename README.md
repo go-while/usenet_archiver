@@ -14,8 +14,8 @@ Nothing here is aimed at binary/NZB workflows.
 
 | Platform | Artifact |
 |----------|----------|
-| **Linux** | AppImage (`Usenet_Archiver-<ver>-x86_64.AppImage`) |
-| **OpenBSD / macOS / other** | Zipapp tarball (`usenet-archiver-<ver>-zipapp.tar.gz`) |
+| **Linux** (glibc 2.34 or newer) | AppImage (`Usenet_Archiver-<ver>-x86_64.AppImage`) |
+| **Alpine, older Linux, OpenBSD, macOS, other** | Zipapp tarball (`usenet-archiver-<ver>-zipapp.tar.gz`) |
 
 GitHub Actions publishes both on tags matching `v*` (e.g. `v2.0.1+gw1`), after the unit and e2e
 tests pass; the tag must match the package version.
@@ -39,12 +39,20 @@ tar xzf usenet-archiver-*-zipapp.tar.gz
 ./usenet-archiver -c pull -h   # pull options
 ```
 
+The AppImage is built on AlmaLinux 9 and runs where glibc is 2.34 or newer: AlmaLinux, Rocky and
+CentOS Stream 9 and later, Ubuntu 22.04 and later, Debian 12 and later, Fedora, Arch, openSUSE
+Tumbleweed and Leap. It does not run on Alpine or other musl-based systems, nor on older glibc
+(Ubuntu 20.04, Debian 11, EL8); use the zipapp tarball there, with Python 3.9 or newer
+(`apk add python3` on Alpine). Run by an older Python, the zipapp says so ("needs Python 3.9 or
+newer"); on openSUSE Leap 15, whose `python3` is 3.6, install `python311` and run
+`python3.11 ./usenet-archiver`.
+
 TLS from the AppImage uses the system's CA certificates. The AppImage brings its own OpenSSL (from
-Ubuntu, which looks in `/usr/lib/ssl`); where that path does not exist, as on Fedora, Arch and
-openSUSE, the client loads the first of the usual system bundles (`/etc/ssl/certs/ca-certificates.crt`,
-`/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem`, …). `SSL_CERT_FILE` or `SSL_CERT_DIR`,
-when set, are used as they are. Before a release, CI runs the AppImage over TLS in Fedora, Arch,
-openSUSE and Debian containers.
+AlmaLinux 9, which looks in `/etc/pki/tls`); where that path does not exist, as on Debian, Ubuntu,
+Arch and openSUSE, the client loads the first of the usual system bundles
+(`/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem`,
+…). `SSL_CERT_FILE` or `SSL_CERT_DIR`, when set, are used as they are. Before a release, CI runs the
+AppImage over TLS in Fedora, Arch, openSUSE, Debian, AlmaLinux 9 and Ubuntu 22.04 containers.
 
 OpenBSD: `pkg_add python3` (and the Tk bindings for your Python if you want the GUI).
 
@@ -60,7 +68,9 @@ usenet-archiver --help         # help (no -c)
 usenet-archiver -c pull --help # CLI
 ```
 
-`make appimage` builds the Linux AppImage locally (needs `python3-tk`, linuxdeploy, appimagetool).
+`make appimage` builds the Linux AppImage on this system (needs `python3-tk`; linuxdeploy and
+appimagetool are downloaded); it runs only where glibc is as new as here. `make appimage-release`
+builds it as releases are built, in an AlmaLinux 9 container (needs docker or podman).
 
 ### Development
 
@@ -318,8 +328,8 @@ small stand-in for tkinter (`tests/faketk`); the tests of the shell scripts in `
 `scripts/` are skipped where bash, zip or rsync is missing. CI (`.github/workflows/test.yml`) runs
 both suites on every push.
 
-`scripts/check_appimage_tls.sh APPIMAGE` runs a built AppImage in Fedora, Arch, openSUSE and Debian
-containers (docker or podman) against a local NNTPS server (`e2e/cmd/nntps-testserver`, with a CA it
+`scripts/check_appimage_tls.sh APPIMAGE` runs a built AppImage in Fedora, Arch, openSUSE, Debian,
+AlmaLinux 9 and Ubuntu 22.04 containers (docker or podman) against a local NNTPS server (`e2e/cmd/nntps-testserver`, with a CA it
 makes at start): every symlink in the AppImage must point inside it, a certificate from a CA that is
 not trusted must be refused, and once the CA is in the system store the pull must get every article.
 `release.yml` runs it after building the AppImage. The unit tests' TLS server uses the test CA in
@@ -381,8 +391,9 @@ gui/usenet_archiver_gui.py  # Back-compat shim: starts the GUI
 app/usenet_archiver.py   # Back-compat shim: version-1 arguments run as pull
 bin/usenet-archiver      # Dev launcher (works from any directory)
 scripts/build_zipapp.sh  # → dist/usenet-archiver + *-zipapp.tar.gz
-scripts/build_appimage.sh
-scripts/check_appimage_tls.sh  # Built AppImage over TLS in Fedora, Arch, openSUSE, Debian containers
+scripts/build_appimage.sh     # → dist/Usenet_Archiver-*.AppImage, from this system's Python and Tk
+scripts/build_appimage_in_container.sh  # The same in an AlmaLinux 9 container, as releases are built
+scripts/check_appimage_tls.sh  # Built AppImage over TLS in Fedora, Arch, openSUSE, Debian, AlmaLinux 9, Ubuntu 22.04
 assets/                  # App icon for AppImage
 extras/                  # Tradspool helpers + gz2mbox
 .github/workflows/       # test.yml: unit + e2e on every push; release.yml: AppImage + zipapp on v* tags
@@ -397,6 +408,19 @@ LICENSE                  # BSD 2-Clause
 ---
 
 ## Changelog
+
+### 2.0.1+gw3 — 2026-10-25
+
+Found by testing 2.0.1+gw2 on 18 distributions.
+
+- **The AppImage did not start on AlmaLinux, Rocky and CentOS Stream 9** (``version `GLIBC_2.35'
+  not found``): it was built on Ubuntu 22.04, whose glibc is newer than theirs (2.34). It is now
+  built in an AlmaLinux 9 container and runs on glibc 2.34 and newer (see "Releases"). It brings
+  AlmaLinux 9's Python 3.9 and OpenSSL now, instead of Ubuntu's Python 3.10.
+- **Python older than 3.9** now gets "usenet-archiver needs Python 3.9 or newer" instead of a
+  `SyntaxError` traceback (openSUSE Leap 15's `python3` is 3.6).
+- Before a release, CI also runs the AppImage over TLS in AlmaLinux 9 and Ubuntu 22.04 containers.
+- The README says where the AppImage runs, and to use the zipapp on Alpine.
 
 ### 2.0.1+gw2 — 2026-10-23
 

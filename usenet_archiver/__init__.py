@@ -2,7 +2,7 @@
 
 import sys
 
-__version__ = "2.0.1+gw2"
+__version__ = "2.0.1+gw3"
 
 # Every entry point imports this file first. Keep it free of syntax newer
 # Pythons need (no f-strings, no __future__ imports), so that an older one
