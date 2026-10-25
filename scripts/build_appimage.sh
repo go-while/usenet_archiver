@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Build a Linux AppImage bundling Python + Tk and the usenet-archiver zipapp.
-# Requires: python3, python3-tk, and (for the final image) appimagetool.
-# Optionally uses linuxdeploy when available to collect shared libraries.
+# Requires: python3, python3-tk (python3-tkinter), and (for the final image)
+# appimagetool. Optionally uses linuxdeploy to collect shared libraries.
+#
+# The AppImage runs where glibc is at least as new as on the build system.
+# Releases are built on AlmaLinux 9 (glibc 2.34) by
+# scripts/build_appimage_in_container.sh; a build here runs only where glibc
+# is as new as this system's.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -54,6 +59,13 @@ if [[ -n "${VIRTUAL_ENV:-}" ]] || [[ "${PY_REAL}" == */.venv/* ]]; then
   fi
 fi
 
+# Where this Python keeps its stdlib (/usr/lib/python3.X on Debian,
+# /usr/lib64/python3.X on AlmaLinux), and where it looks for it under
+# PYTHONHOME: <PYTHONHOME>/<platlibdir>/python3.X.
+STDLIB="$("${PY_REAL}" -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')"
+PLATLIB="$("${PY_REAL}" -c 'import sys; print(getattr(sys, "platlibdir", "lib"))')"
+PYLIB="${APPDIR}/usr/${PLATLIB}/python${PYVER}"
+
 CP_ERR="$(mktemp)"
 trap 'rm -f "${CP_ERR}"' EXIT
 cp_tree() {
@@ -71,11 +83,11 @@ cp_tree() {
 cp_tree "${PY_REAL}" "${APPDIR}/usr/bin/python3"
 chmod +x "${APPDIR}/usr/bin/python3"
 
-# Stdlib (includes tkinter on Debian/Ubuntu when python3-tk is installed).
-if [[ -d "/usr/lib/python${PYVER}" ]]; then
-  mkdir -p "${APPDIR}/usr/lib/python${PYVER}"
+# Stdlib, with tkinter and lib-dynload (python3-tk / python3-tkinter).
+if [[ -d "${STDLIB}" ]]; then
+  mkdir -p "${PYLIB}"
   # Copy stdlib but skip bulky / unused trees to keep the AppImage smaller.
-  "${PYTHON}" - "/usr/lib/python${PYVER}" "${APPDIR}/usr/lib/python${PYVER}" <<'PY'
+  "${PYTHON}" - "${STDLIB}" "${PYLIB}" <<'PY'
 import shutil
 import sys
 from pathlib import Path
@@ -110,20 +122,24 @@ shutil.copytree(src, dst, ignore=ignore, symlinks=True)
 print(f"Copied stdlib from {src} -> {dst}")
 PY
 else
-  echo "error: missing /usr/lib/python${PYVER}" >&2
+  echo "error: missing ${STDLIB}" >&2
   exit 1
 fi
 
 # Ensure _tkinter extension is present (python3-tk).
-if ! ls "${APPDIR}/usr/lib/python${PYVER}/lib-dynload"/_tkinter*.so >/dev/null 2>&1; then
+if ! ls "${PYLIB}/lib-dynload"/_tkinter*.so >/dev/null 2>&1; then
   TKSO="$("${PYTHON}" -c 'import _tkinter; print(_tkinter.__file__)')"
-  mkdir -p "${APPDIR}/usr/lib/python${PYVER}/lib-dynload"
-  cp_tree "${TKSO}" "${APPDIR}/usr/lib/python${PYVER}/lib-dynload/"
+  mkdir -p "${PYLIB}/lib-dynload"
+  cp_tree "${TKSO}" "${PYLIB}/lib-dynload/"
 fi
 
-# Tcl/Tk script libraries.
+# Tcl/Tk script libraries: /usr/share/tcltk (Debian, Ubuntu),
+# /usr/share/tcl8.6 and tk8.6 (AlmaLinux, Fedora), /usr/lib/tcl8.6 (Arch).
 if [[ -d /usr/share/tcltk ]]; then
   cp_tree /usr/share/tcltk "${APPDIR}/usr/share/"
+elif [[ -d /usr/share/tcl8.6 ]]; then
+  cp_tree /usr/share/tcl8.6 "${APPDIR}/usr/share/"
+  cp_tree /usr/share/tk8.6 "${APPDIR}/usr/share/"
 elif [[ -d /usr/lib/tcl8.6 ]]; then
   mkdir -p "${APPDIR}/usr/lib"
   cp_tree /usr/lib/tcl8.6 "${APPDIR}/usr/lib/" 2>/dev/null || true
@@ -158,7 +174,8 @@ Terminal=false
 EOF
 cp "${APPDIR}/usenet-archiver.desktop" "${APPDIR}/usr/share/applications/"
 
-cat > "${APPDIR}/AppRun" << 'EOF'
+write_apprun() {
+  cat > "${APPDIR}/AppRun" << 'EOF'
 #!/bin/bash
 set -e
 SELF="$(readlink -f "$0")"
@@ -169,19 +186,19 @@ export PYTHONHOME="${APPDIR}/usr"
 export PYTHONNOUSERSITE=1
 unset PYTHONPATH
 
-# Tcl/Tk data dirs (Debian/Ubuntu layout under usr/share/tcltk).
-if [[ -d "${APPDIR}/usr/share/tcltk" ]]; then
-  for d in "${APPDIR}/usr/share/tcltk"/tcl[0-9]*; do
-    if [[ -d "$d" ]]; then export TCL_LIBRARY="$d"; break; fi
-  done
-  for d in "${APPDIR}/usr/share/tcltk"/tk[0-9]*; do
-    if [[ -d "$d" ]]; then export TK_LIBRARY="$d"; break; fi
-  done
-fi
+# Tcl/Tk script libraries, from whichever layout the build system had.
+for d in "${APPDIR}"/usr/share/tcltk/tcl[0-9]* "${APPDIR}"/usr/share/tcl[0-9]* "${APPDIR}"/usr/lib/tcl[0-9]*; do
+  if [[ -d "$d" ]]; then export TCL_LIBRARY="$d"; break; fi
+done
+for d in "${APPDIR}"/usr/share/tcltk/tk[0-9]* "${APPDIR}"/usr/share/tk[0-9]* "${APPDIR}"/usr/lib/tk[0-9]*; do
+  if [[ -d "$d" ]]; then export TK_LIBRARY="$d"; break; fi
+done
 
 exec "${APPDIR}/usr/bin/python3" "${APPDIR}/usr/lib/usenet-archiver/usenet-archiver" "$@"
 EOF
-chmod +x "${APPDIR}/AppRun"
+  chmod +x "${APPDIR}/AppRun"
+}
+write_apprun
 
 copy_ld_deps() {
   local bin="$1"
@@ -190,7 +207,7 @@ copy_ld_deps() {
   ldd "${bin}" 2>/dev/null | awk '/=>/ {print $3} /^\// {print $1}' | while read -r lib; do
     [[ -z "${lib}" || ! -f "${lib}" ]] && continue
     case "${lib}" in
-      */ld-linux*.so*|*/libc.so*|*/libm.so*|*/libdl.so*|*/libpthread.so*|*/librt.so*|*/libresolv.so*)
+      */ld-linux*.so*|*/libc.so*|*/libm.so*|*/libdl.so*|*/libpthread.so*|*/librt.so*|*/libresolv.so*|*/libutil.so*|*/libanl.so*)
         continue
         ;;
     esac
@@ -202,8 +219,10 @@ copy_ld_deps() {
 
 echo "Collecting shared library dependencies ..."
 copy_ld_deps "${APPDIR}/usr/bin/python3"
-for so in "${APPDIR}/usr/lib/python${PYVER}/lib-dynload"/_tkinter*.so; do
-  [[ -f "${so}" ]] && copy_ld_deps "${so}"
+# Every extension module's, not only _tkinter's: _ssl needs the build
+# system's OpenSSL, which an older system's would be too old for.
+for so in "${APPDIR}/usr/${PLATLIB}/python${PYVER}/lib-dynload"/*.so; do
+  if [[ -f "${so}" ]]; then copy_ld_deps "${so}"; fi
 done
 # libpython often needed next to the interpreter
 for lib in /usr/lib/"${ARCH}"-linux-gnu/libpython"${PYVER}"*.so* \
@@ -285,27 +304,7 @@ if [[ -x "${LINUXDEPLOY}" ]]; then
       echo "warning: linuxdeploy failed; continuing with manually copied deps" >&2
     }
   # Restore AppRun in case the tool still overwrote it.
-  cat > "${APPDIR}/AppRun" << 'EOF'
-#!/bin/bash
-set -e
-SELF="$(readlink -f "$0")"
-APPDIR="${SELF%/*}"
-export PATH="${APPDIR}/usr/bin:${PATH}"
-export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${APPDIR}/usr/lib64:${APPDIR}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
-export PYTHONHOME="${APPDIR}/usr"
-export PYTHONNOUSERSITE=1
-unset PYTHONPATH
-if [[ -d "${APPDIR}/usr/share/tcltk" ]]; then
-  for d in "${APPDIR}/usr/share/tcltk"/tcl[0-9]*; do
-    if [[ -d "$d" ]]; then export TCL_LIBRARY="$d"; break; fi
-  done
-  for d in "${APPDIR}/usr/share/tcltk"/tk[0-9]*; do
-    if [[ -d "$d" ]]; then export TK_LIBRARY="$d"; break; fi
-  done
-fi
-exec "${APPDIR}/usr/bin/python3" "${APPDIR}/usr/lib/usenet-archiver/usenet-archiver" "$@"
-EOF
-  chmod +x "${APPDIR}/AppRun"
+  write_apprun
 fi
 
 APPIMAGETOOL="${APPIMAGETOOL:-}"

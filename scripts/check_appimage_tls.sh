@@ -15,8 +15,9 @@
 #   1. the CA is not trusted yet: the pull must fail on the certificate;
 #   2. the CA is added to the system store (the distribution's own tool):
 #      the pull must fetch all 5 articles.
-# The AppImage bundles Ubuntu's OpenSSL, which looks for CA certificates in
-# /usr/lib/ssl only; step 2 fails on any distribution without that path
+# The AppImage bundles the build system's OpenSSL, which looks for CA
+# certificates only where that system keeps them (/etc/pki/tls on AlmaLinux,
+# /usr/lib/ssl on Ubuntu); step 2 fails on any distribution without that path
 # unless the client finds the system bundle itself.
 set -euo pipefail
 
