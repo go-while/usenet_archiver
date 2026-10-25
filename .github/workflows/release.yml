@@ -81,7 +81,7 @@ jobs:
 
       # The AppImage is built on Ubuntu; run it over TLS on other
       # distributions (a local test server, no real one).
-      - name: TLS from the AppImage on Fedora, Arch, openSUSE and Debian
+      - name: TLS from the AppImage on Fedora, Arch, openSUSE, Debian, AlmaLinux 9 and Ubuntu 22.04
         run: ./scripts/check_appimage_tls.sh dist/Usenet_Archiver-*-x86_64.AppImage
 
       - name: Upload AppImage

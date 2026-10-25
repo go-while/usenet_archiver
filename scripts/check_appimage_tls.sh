@@ -3,7 +3,8 @@
 #
 #   scripts/check_appimage_tls.sh APPIMAGE [IMAGE...]
 #
-# Default images: Fedora, Arch, openSUSE Tumbleweed and Debian. Needs go and
+# Default images: Fedora, Arch, openSUSE Tumbleweed, Debian, AlmaLinux 9 (the
+# oldest glibc it must run on, 2.34) and Ubuntu 22.04. Needs go and
 # docker (or podman; CONTAINER=... picks one); NNTPS_TESTSERVER=... names a
 # prebuilt test server instead of go. No real server is contacted:
 # e2e/cmd/nntps-testserver serves 5 articles on 127.0.0.1 with a certificate
@@ -106,6 +107,8 @@ if [[ ${#IMAGES[@]} -eq 0 ]]; then
     docker.io/library/archlinux:latest
     docker.io/opensuse/tumbleweed:latest
     docker.io/library/debian:stable-slim
+    docker.io/library/almalinux:9
+    docker.io/library/ubuntu:22.04
   )
 fi
 CONTAINER="${CONTAINER:-}"
