@@ -19,6 +19,14 @@ The 2.0.1+gw1 AppImage, run on Fedora, Arch, openSUSE and Debian images:
   /etc/python3.10/sitecustomize.py outside the AppImage.
 - release.yml never ran the AppImage outside Ubuntu.
 
+The 2.0.1+gw2 release test on 18 distributions:
+- the AppImage, built on Ubuntu 22.04, needs glibc 2.35 and did not start
+  on AlmaLinux, Rocky and CentOS Stream 9 (glibc 2.34). It is now built in
+  an AlmaLinux 9 container, whose layout differs from Debian's: the stdlib
+  in /usr/lib64/python3.X, Tcl/Tk in /usr/share/tcl8.6 and tk8.6, and the
+  libraries of the stdlib's extension modules (OpenSSL for _ssl) must come
+  along, since an older system's would be too old for them.
+
 The workflow and the AppImage build cannot run here; those checks read
 the files.
 """
@@ -107,6 +115,53 @@ class TestAppImageScript(unittest.TestCase):
         with open(os.path.join(lib, "libfoo.so.1")) as fh:
             self.assertEqual(fh.read(), "the library\n")
 
+    def test_stdlib_from_where_python_keeps_it(self):
+        # /usr/lib/python3.X on Debian, /usr/lib64/python3.X on AlmaLinux:
+        # Python's own sysconfig says where, and sys.platlibdir where it
+        # looks for it under PYTHONHOME.
+        s = _read("scripts/build_appimage.sh")
+        self.assertFalse('"/usr/lib/python${PYVER}"' in s, "stdlib path hard-coded")
+        self.assertTrue("sysconfig" in s and "platlibdir" in s, "stdlib path not from sysconfig")
+
+    def test_libraries_of_every_stdlib_module_bundled(self):
+        # Not only _tkinter's: _ssl needs AlmaLinux's OpenSSL 3.5, _crypt
+        # libcrypt.so.2, which Ubuntu 22.04 does not have.
+        s = _read("scripts/build_appimage.sh")
+        self.assertTrue(re.search(r'for so in "\$\{APPDIR\}/usr/\$\{PLATLIB\}/python\$\{PYVER\}/lib-dynload"/\*\.so; do', s),
+                        "no copy_ld_deps for every lib-dynload module")
+
+    @unittest.skipUnless(shutil.which("bash"), "needs bash")
+    def test_apprun_finds_tcl_and_tk(self):
+        runs = re.findall(r"""cat > "\$\{APPDIR\}/AppRun" << 'EOF'\n(.*?)\nEOF\n""",
+                          _read("scripts/build_appimage.sh"), re.S)
+        self.assertTrue(runs)
+        layouts = {
+            "debian": ("usr/share/tcltk/tcl8.6", "usr/share/tcltk/tk8.6"),
+            "almalinux": ("usr/share/tcl8.6", "usr/share/tk8.6"),
+        }
+        for i, apprun in enumerate(runs):
+            for name, (tcl, tk) in layouts.items():
+                with self.subTest(apprun=i, layout=name):
+                    tmp = tempfile.TemporaryDirectory()
+                    self.addCleanup(tmp.cleanup)
+                    appdir = os.path.join(tmp.name, "App Dir")
+                    for d in (tcl, tk, "usr/bin"):
+                        os.makedirs(os.path.join(appdir, d))
+                    # the "interpreter" prints what AppRun set up for it
+                    py = os.path.join(appdir, "usr", "bin", "python3")
+                    with open(py, "w") as fh:
+                        fh.write('#!/bin/sh\necho "TCL_LIBRARY=$TCL_LIBRARY"\necho "TK_LIBRARY=$TK_LIBRARY"\n')
+                    run = os.path.join(appdir, "AppRun")
+                    with open(run, "w") as fh:
+                        fh.write(apprun + "\n")
+                    os.chmod(py, 0o755)
+                    os.chmod(run, 0o755)
+                    env = {k: v for k, v in os.environ.items() if k not in ("TCL_LIBRARY", "TK_LIBRARY")}
+                    p = subprocess.run([run], env=env, capture_output=True, text=True, timeout=60)
+                    self.assertEqual(p.returncode, 0, p.stderr)
+                    self.assertIn("TCL_LIBRARY=" + os.path.join(appdir, tcl) + "\n", p.stdout)
+                    self.assertIn("TK_LIBRARY=" + os.path.join(appdir, tk) + "\n", p.stdout)
+
     def test_stdlib_copy_keeps_no_links_out_of_the_appimage(self):
         m = re.search(r"<<'PY'\n(.*?)\nPY\n", _read("scripts/build_appimage.sh"), re.S)
         self.assertIsNotNone(m)
@@ -153,12 +208,22 @@ class TestReleaseWorkflow(unittest.TestCase):
         self.assertNotIn("contents: write", top)
         self.assertIn("contents: write", self.yml.split("\n  release:", 1)[1])
 
+    def appimage_job(self):
+        return self.yml.split("\n  appimage:", 1)[1].split("\n  release:", 1)[0]
+
     def test_appimage_run_on_other_distributions(self):
-        job = self.yml.split("\n  appimage:", 1)[1].split("\n  release:", 1)[0]
+        job = self.appimage_job()
         self.assertIn("scripts/check_appimage_tls.sh", job)
         script = _read("scripts/check_appimage_tls.sh")
-        for image in ("fedora", "archlinux", "opensuse", "debian"):
-            self.assertIn(image, script)
+        for image in ("fedora", "archlinux", "opensuse", "debian", "almalinux:9", "ubuntu:22.04"):
+            self.assertTrue(image in script, image + " missing in check_appimage_tls.sh")
+
+    def test_appimage_built_on_almalinux_9(self):
+        # glibc 2.34: the oldest of the distributions it is checked on
+        job = self.appimage_job()
+        self.assertTrue("./scripts/build_appimage_in_container.sh" in job, "not built in a container")
+        self.assertFalse("./scripts/build_appimage.sh" in job, "built on the runner itself")
+        self.assertIn("docker.io/library/almalinux:9", _read("scripts/build_appimage_in_container.sh"))
 
 
 if __name__ == "__main__":

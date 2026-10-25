@@ -1,6 +1,6 @@
 # Packaging targets. Application code: usenet_archiver/. Zipapp: scripts/build_zipapp.sh
 
-.PHONY: zipapp clean-zipapp appimage clean-appimage test e2e gui
+.PHONY: zipapp clean-zipapp appimage appimage-release clean-appimage test e2e gui
 
 zipapp:
 	./scripts/build_zipapp.sh
@@ -10,6 +10,10 @@ clean-zipapp:
 
 appimage: zipapp
 	./scripts/build_appimage.sh
+
+# As release.yml builds it: in an AlmaLinux 9 container (glibc 2.34). Needs docker or podman.
+appimage-release:
+	./scripts/build_appimage_in_container.sh
 
 clean-appimage:
 	rm -rf .appimage_stage dist/*.AppImage

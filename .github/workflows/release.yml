@@ -58,17 +58,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3 python3-tk libfuse2 wget file
-
-      - name: Build zipapp + AppImage
+      # On AlmaLinux 9 (glibc 2.34), so that it runs there, on Rocky and
+      # CentOS Stream 9, and on everything newer.
+      - name: Build the AppImage in an AlmaLinux 9 container
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
-          chmod +x scripts/build_zipapp.sh scripts/build_appimage.sh bin/usenet-archiver
-          ./scripts/build_appimage.sh
+          ./scripts/build_appimage_in_container.sh
           # Smoke-test CLI path inside AppImage (no display needed)
           ./dist/Usenet_Archiver-*-x86_64.AppImage -c --help > help.txt
           head -n 5 help.txt
@@ -79,9 +75,9 @@ jobs:
           go-version-file: e2e/go.mod
           cache-dependency-path: e2e/go.sum
 
-      # The AppImage is built on Ubuntu; run it over TLS on other
-      # distributions (a local test server, no real one).
-      - name: TLS from the AppImage on Fedora, Arch, openSUSE and Debian
+      # Run it over TLS on other distributions (a local test server, no
+      # real one).
+      - name: TLS from the AppImage on Fedora, Arch, openSUSE, Debian, AlmaLinux 9 and Ubuntu 22.04
         run: ./scripts/check_appimage_tls.sh dist/Usenet_Archiver-*-x86_64.AppImage
 
       - name: Upload AppImage
