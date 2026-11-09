@@ -313,7 +313,10 @@ End-to-end tests (`e2e/`, Go 1.27+): a fake NNTP server from
 [go-lib-mbox2nntp](https://github.com/go-while/go-lib-mbox2nntp), the parser
 [mbox2nntp](https://github.com/go-while/mbox2nntp) imports with, reads the mbox back. Every article
 must come back byte-identical and exactly once, and a pull that did not get every article must not
-be recorded as completed or exit 0.
+be recorded as completed or exit 0. The fake server also plays the servers a downloader meets: a
+farm whose frontends report different numbers to each connection, a group of ten million numbers,
+an overview that is out of step with the articles or cut short, XHDR only, replies that arrive a
+byte or a line at a time, a limit on connections, cut and endless replies.
 
 ```bash
 make e2e
@@ -408,6 +411,17 @@ LICENSE                  # BSD 2-Clause
 ---
 
 ## Changelog
+
+### Unreleased
+
+- **A truncated overview lost articles:** a server that answers an OVER/XOVER range wider than it
+  allows with only its first part, without an error, left out the rest of every chunk (with the
+  default `--overview-chunk 10000` and a server that lists 1000 at a time, nine in ten articles),
+  and the job was recorded as complete. The scan now goes on after the last row the server listed.
+- Tests: the e2e suite uses nntp-testkit v0.11.2 and tests server farms whose frontends report
+  different numbers, `211 0 0 0`, the XHDR fallback, an overview whose Message-IDs are not the
+  articles', slow servers within and over `--response-timeout`, at most `-C` connections, a group of
+  ten million numbers, a truncated overview, and that COMPRESS is not used.
 
 ### 2.0.1+gw3 — 2026-10-25
 
