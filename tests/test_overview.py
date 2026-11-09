@@ -106,6 +106,35 @@ class TestDateWindow(unittest.TestCase):
         self.assertEqual([r.article_id for r in rows], [7, 93])
 
 
+class TruncatingOverClient(FakeOverClient):
+    """Lists at most `cap` numbers of a range, the first ones, and says
+    nothing about the rest (providers that truncate a wide OVER range)."""
+
+    def __init__(self, dates, cap):
+        super().__init__(dates)
+        self.cap = cap
+
+    def over(self, a, b):
+        return super().over(a, min(b, a + self.cap - 1))
+
+
+class TestTruncatedOverview(unittest.TestCase):
+    def test_rest_of_a_truncated_range_is_listed(self):
+        dates = {n: None for n in range(1, 1001)}
+        client = TruncatingOverClient(dates, 100)
+        rows = find_articles_in_date_range(client, 1, 1000, None, None, chunk_size=300)
+        self.assertEqual([r.article_id for r in rows], list(range(1, 1001)))
+
+    def test_chunk_ending_in_a_gap(self):
+        # articles at 5, 15, 25: the first chunk of 10 ends in a gap; the
+        # next chunk starts in it, after the last row, and the scan goes on
+        # in chunks of 10 from there
+        client = FakeOverClient({5: None, 15: None, 25: None})
+        rows = find_articles_in_date_range(client, 1, 30, None, None, chunk_size=10)
+        self.assertEqual([r.article_id for r in rows], [5, 15, 25])
+        self.assertEqual(client.calls, [(1, 10), (6, 15), (16, 25), (26, 30)])
+
+
 class TestNonMonotonic(unittest.TestCase):
     def test_out_of_order_date_still_found_by_scan(self):
         from usenet_archiver.overview import _scan_chunks

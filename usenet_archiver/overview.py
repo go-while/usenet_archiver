@@ -249,7 +249,14 @@ def _scan_chunks(
             if end_d is not None and d > end_d:
                 continue
             matched.append(row)
-        cursor = chunk_end + 1
+        # A server may answer a range wider than it allows with its first
+        # part only, without saying so: go on after the last row it listed.
+        # Where the chunk ends in a gap, the next chunk starts in the gap.
+        highest = max((row.article_id for row in rows), default=None)
+        if highest is not None and cursor <= highest < chunk_end:
+            cursor = highest + 1
+        else:
+            cursor = chunk_end + 1
     matched.sort(key=lambda r: r.article_id)
     return matched
 
