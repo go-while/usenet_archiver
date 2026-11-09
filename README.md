@@ -324,6 +324,12 @@ make e2e
 cd e2e && go test -v ./...
 ```
 
+`TestRealServer` runs the same round against a real server (INN, Diablo, NewsCache,
+OpenUsenetServer, ...): it injects a fresh set of tricky articles by POST and/or IHAVE, waits until
+the reader lists them, pulls the group with the CLI and reports what the server refused or changed
+and whether every mbox message is identical to what the server serves. It is skipped unless
+`UA_REAL_ADDR` is set; [`e2e/REALSERVER.md`](e2e/REALSERVER.md) has the command and the variables.
+
 The e2e suite can mark a test for a known bug that is not fixed yet (`knownBug`, with the number of
 the review finding): it is then reported as skipped, and fails once it passes, so the mark goes
 with the fix. No test is marked at present. The GUI tests drive the Tk form headless through a
@@ -422,6 +428,9 @@ LICENSE                  # BSD 2-Clause
   different numbers, `211 0 0 0`, the XHDR fallback, an overview whose Message-IDs are not the
   articles', slow servers within and over `--response-timeout`, at most `-C` connections, a group of
   ten million numbers, a truncated overview, and that COMPRESS is not used.
+- e2e: `TestRealServer` runs the e2e round against a real NNTP server (see `e2e/REALSERVER.md`);
+  `e2e/cmd/realserver-fake` stands in for one. First round, 2026-11-09: INN, Diablo, NewsCache and
+  OpenUsenetServer, no archiver findings (results in `e2e/REALSERVER.md`).
 
 ### 2.0.1+gw3 — 2026-10-25
 
