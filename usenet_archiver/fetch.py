@@ -176,6 +176,46 @@ def _worker(
         _put(out_queue, _WORKER_DONE, abort)
 
 
+def _ask_again(
+    rows: Sequence[OverviewRow],
+    group: str,
+    conn_kwargs: dict,
+    pipeline_depth: int,
+    stop_event: threading.Event,
+) -> Dict[int, Tuple[bytes, str]]:
+    """ARTICLE once more, on one new connection, for rows that got 423/430.
+
+    The overview listed them, so a 423 may come from a frontend of a server
+    farm that lags behind the others. Returns {article_id: (content, resp)}
+    for the rows asked; a failure ends the retry, and the rows not asked
+    keep their first answer.
+    """
+    answers: Dict[int, Tuple[bytes, str]] = {}
+    client: Optional[NNTPClient] = None
+    try:
+        client = _make_client(conn_kwargs)
+        client.connect()
+        client.group(group)
+        for batch in _chunks(list(rows), max(1, pipeline_depth)):
+            if stop_event.is_set():
+                break
+            results = client.articles_pipelined([r.article_id for r in batch])
+            for row, (_spec, content, resp) in zip(batch, results):
+                answers[row.article_id] = (content, resp)
+    except (NNTPTimeout, NNTPError, OSError) as e:
+        logger.warning("asking again for missing articles failed (%s); %s not asked", e, len(rows) - len(answers))
+        if client is not None:
+            client.close()
+            client = None
+    finally:
+        if client is not None:
+            try:
+                client.quit()
+            except Exception:
+                client.close()
+    return answers
+
+
 def fetch_articles_parallel(
     rows: Sequence[OverviewRow],
     group: str,
@@ -191,6 +231,10 @@ def fetch_articles_parallel(
     ``on_article(row, content, resp)`` is called from the main thread for each
     result (thread-safe writer assumed). Returns
     ``(fetched_ok, missing, errors, elapsed_seconds)``.
+
+    An article the overview listed but the server answered 423/430 for is
+    asked for once more on a new connection after the workers are done (a
+    lagging frontend of a server farm); only then is it reported missing.
     """
     if not rows:
         return 0, 0, 0, 0.0
@@ -235,6 +279,8 @@ def fetch_articles_parallel(
     t0 = time.monotonic()
     last_log = t0
     bytes_ok = 0
+    # rows answered 423/430: reported once asked again
+    deferred: List[Tuple[OverviewRow, str]] = []
 
     try:
         while done_workers < n_conn:
@@ -253,6 +299,9 @@ def fetch_articles_parallel(
                 continue
 
             row, content, resp = item
+            if not content and is_missing_article(resp):
+                deferred.append((row, resp))
+                continue
             on_article(row, content, resp)
             processed += 1
             if content:
@@ -291,6 +340,26 @@ def fetch_articles_parallel(
             shared.cut_all()
         for t in threads:
             t.join(timeout=10)
+
+    if deferred:
+        answers: Dict[int, Tuple[bytes, str]] = {}
+        if done_workers == n_conn and not stop_event.is_set():
+            logger.info("asking again for %s article(s) answered 423/430", len(deferred))
+            answers = _ask_again([r for r, _ in deferred], group, conn_kwargs, depth, stop_event)
+        for row, first_resp in deferred:
+            content, resp = answers.get(row.article_id, (b"", first_resp))
+            if content:
+                fetched_ok += 1
+                bytes_ok += len(content)
+                logger.info("article %s found when asked again", row.article_id)
+            elif is_too_big(resp):
+                too_big += 1
+            else:
+                # asked again in vain, or the retry failed: the first answer stands
+                resp = first_resp
+                missing += 1
+            on_article(row, content, resp)
+            processed += 1
 
     elapsed = max(time.monotonic() - t0, 1e-6)
     return fetched_ok, missing, errors, elapsed
