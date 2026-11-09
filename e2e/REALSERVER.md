@@ -101,7 +101,7 @@ listed article once, identical to what the server serves. What the servers did w
 
 | Server | Injected | Refused | Changed (served vs injected) |
 |---|---|---|---|
-| INN 2.8.0 prerelease (main 4c5218607), nnrpd + innd | POST, IHAVE | colon-less `From ` header lines (441 / 437) | adds Path, Injection-Info, Organization, Xref; IHAVE prepends to Path. A bare CR is accepted and served unchanged (deliberate since 1999, logged only) |
+| INN 2.8.0 prerelease (main 4c5218607), nnrpd + innd | POST, IHAVE | colon-less `From ` header lines (441 / 437) | adds Path, Injection-Info, Organization, Xref; IHAVE prepends to Path. A bare CR is accepted and served unchanged (deliberate since 1999, logged only; open question upstream: [InterNetNews/inn#383](https://github.com/InterNetNews/inn/issues/383)) |
 | Diablo (main 5f3a3cc), dreaderd + feeder | POST, IHAVE | nothing | adds Xref; POST adds Path, Injection-Info; IHAVE prepends to Path. A bare CR is served unchanged (`rejectartswithbarecr` is off by default) |
 | NewsCache 1.3.23 (ba7ef87) in front of OUS 0.8.0 | POST | bare CR (441, by design) | adds X-NNTP-Posting-Host; the rest is OUS's. A Latin-1 article got 240, stays in NewsCache's outgoing spool because OUS answers 403 |
 | OpenUsenetServer 0.8.0 | POST, IHAVE | Latin-1 body (POST 403, IHAVE 436; OUS O-13) | **cuts a body line at a bare CR** (splits it into two lines); **rewrites a colon-less header line** as `name: value`; reorders and unfolds header fields (O-05); adds Path, Injection-*, Organization. Reported to its maintainers |
