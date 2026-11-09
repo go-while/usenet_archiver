@@ -421,7 +421,15 @@ LICENSE                  # BSD 2-Clause
 
 ## Changelog
 
-### Unreleased
+### 2.0.1+gw4 — 2026-11-09
+
+Found by the nntp-testkit v0.11.2 tests; a round against INN, Diablo, NewsCache and
+OpenUsenetServer found nothing more on the archiver side.
+
+**Check groups pulled from a server farm or a server that limits OVER ranges.** Earlier versions
+could record such a group as complete without every article (a truncated overview, or a frontend
+that answered 423 for new articles). Pull it again without `--skip-completed`; the Message-ID dedup
+adds only what is missing.
 
 - **423 for an article the overview listed** is asked for once more, on a new connection, after
   the fetch: a frontend of a server farm that lags behind the others answers 423 for new articles,
