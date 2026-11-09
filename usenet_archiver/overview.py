@@ -128,9 +128,12 @@ def fetch_with_reconnect(client, start_id: int, end_id: int, tries: int = OVERVI
     After a timeout or a cut the old connection is out of step, so it is never
     read again: client.reconnect() opens a new one and selects the group. A
     failed reconnect counts as a try. The last failure is raised.
+
+    RangeTooLarge is raised at once: the connection is in step, and the
+    caller asks again with a smaller range.
     """
     from . import nntp
-    from .nntp import NNTPError, NNTPTimeout
+    from .nntp import NNTPError, NNTPTimeout, RangeTooLarge
 
     need_reconnect = False
     for attempt in range(1, tries + 1):
@@ -140,6 +143,8 @@ def fetch_with_reconnect(client, start_id: int, end_id: int, tries: int = OVERVI
                 client.reconnect()
                 need_reconnect = connecting = False
             return fetch_overview_chunk(client, start_id, end_id)
+        except RangeTooLarge:
+            raise
         except (NNTPTimeout, NNTPError, OSError) as e:
             need_reconnect = True
             if attempt == tries:
@@ -221,6 +226,8 @@ def _scan_chunks(
     seen: Optional[List[int]] = None,
     check: Optional[Callable[[], None]] = None,
 ) -> List[OverviewRow]:
+    from .nntp import RangeTooLarge
+
     matched: List[OverviewRow] = []
     cursor = start_id
     while cursor <= end_id:
@@ -228,7 +235,17 @@ def _scan_chunks(
             check()
         chunk_end = min(end_id, cursor + chunk_size - 1)
         # A failed chunk raises: skipping it would lose its articles silently.
-        rows = fetch(cursor, chunk_end)
+        try:
+            rows = fetch(cursor, chunk_end)
+        except RangeTooLarge as e:
+            span = chunk_end - cursor + 1
+            if span <= 1:
+                raise
+            # The server takes smaller ranges: halve, and keep the smaller
+            # size for the rest of the scan.
+            chunk_size = max(1, span // 2)
+            logger.warning("Overview range %s-%s refused (%s); trying %s at a time", cursor, chunk_end, e, chunk_size)
+            continue
         if seen is not None:
             seen.append(len(rows))
         for row in rows:

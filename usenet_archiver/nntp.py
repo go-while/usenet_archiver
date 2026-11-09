@@ -32,6 +32,12 @@ class AuthError(NNTPError):
     """The server refused the user name or the password."""
 
 
+class RangeTooLarge(NNTPError):
+    """The server refused an overview range as too wide (503, or 501 while
+    the command works for one article). The connection is still in step:
+    ask again with a smaller range."""
+
+
 class LineTooLong(NNTPError):
     """A line over MAX_LINE. The rest of it has been read and dropped, so the
     stream is still in step."""
@@ -170,6 +176,9 @@ class NNTPClient:
         self._buf = bytearray()
         self.current_group: Optional[str] = None  # last group selected with GROUP
         self.capabilities: Dict[str, List[str]] = {}
+        # OVER/XOVER seen working (224/423), or found unknown to the server
+        self._over_works: set = set()
+        self._over_unknown: set = set()
         self.logger = logging.getLogger(__name__)
         if verbose:
             self.logger.setLevel(logging.DEBUG)
@@ -514,6 +523,10 @@ class NNTPClient:
         the range) gives no lines. When the server knows neither command
         (500/501/502 to both), command_used is "". Any other answer raises
         NNTPError: it is a failure, not an empty range.
+
+        A range wider than the server takes raises RangeTooLarge: 503 for a
+        range of more than one number, or 501 from a command that answers
+        for a single number (probed once, then remembered).
         """
         commands: Sequence[str] = ("OVER", "XOVER")
         # Prefer OVER when advertised; still try both.
@@ -527,15 +540,43 @@ class NNTPClient:
             if self.verbose:
                 print(f"{cmd} {start_id}-{end_id} response: {resp}")
             if resp.startswith("224"):
+                self._over_works.add(cmd)
                 # one line per article at most: a longer reply is hostile or out of step
                 return self._read_multiline(max_lines=end_id - start_id + 1), cmd, resp
             if resp.startswith("423"):  # no articles in that range
+                self._over_works.add(cmd)
                 return [], cmd, resp
+            wide = end_id > start_id
+            if wide and resp.startswith("503"):
+                raise RangeTooLarge(f"{cmd} {start_id}-{end_id}: {resp}")
+            if wide and resp.startswith("501") and self._over_answers_one(cmd, start_id):
+                raise RangeTooLarge(f"{cmd} {start_id}-{end_id}: {resp}")
             # 500/501/502 = not supported; try next
             if resp.startswith(("500", "501", "502")):
                 continue
             raise NNTPError(f"{cmd} {start_id}-{end_id} failed: {resp}")
         return [], "", last_resp
+
+    def _over_answers_one(self, cmd: str, number: int) -> bool:
+        """True when cmd works for the single article number, so that its 501
+        to a range means the range was too wide, not an unknown command."""
+        if cmd in self._over_works:
+            return True
+        if cmd in self._over_unknown:
+            return False
+        resp = self._command(f"{cmd} {number}")
+        if self.verbose:
+            print(f"{cmd} {number} response: {resp}")
+        if resp.startswith("224"):
+            self._read_multiline(max_lines=1)
+        if resp.startswith(("224", "423")):
+            self._over_works.add(cmd)
+            return True
+        if not resp.startswith(("500", "501", "502")):
+            # 420, 412, 503 ...: no answer either way; ask again next time
+            return False
+        self._over_unknown.add(cmd)
+        return False
 
     def xhdr_date(self, start_id: int, end_id: int) -> List[Tuple[int, str]]:
         """XHDR DATE fallback; returns list of (article_id, date_string).
@@ -548,6 +589,8 @@ class NNTPClient:
             print(f"XHDR DATE {start_id}-{end_id} response: {resp}")
         if resp.startswith("423"):
             return []
+        if end_id > start_id and resp.startswith("503"):
+            raise RangeTooLarge(f"XHDR DATE {start_id}-{end_id}: {resp}")
         if not resp.startswith("221"):
             raise NNTPError(f"XHDR DATE {start_id}-{end_id} failed: {resp}")
         result: List[Tuple[int, str]] = []

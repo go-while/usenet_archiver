@@ -127,7 +127,8 @@ usenet-archiver -c post -g misc.test < msg.eml
   **`completed_newsgroups.log` only after a successful, complete pull** (cancelled / errored runs
   are not recorded). Re-running is safe and **incremental** via Message-ID dedup. Use
   **`--skip-completed`** to hard-skip jobs already listed.
-- Article payloads stay **bytes** end to end; missing articles (`430`/`423`) are skipped.
+- Article payloads stay **bytes** end to end; missing articles (`430`/`423`) are skipped, after
+  being asked for once more on a new connection (a frontend of a server farm may lag).
 - Newsgroup names containing **binary** (and common misspellings / translations) are **skipped**
   automatically.
 - Some servers are **blacklisted** for archiving (see below); the tool refuses them with *This
@@ -196,7 +197,7 @@ Short and long forms are interchangeable (e.g. `-s` / `--server`, `-u` / `--user
 | `-t`, `--timeout` | Timeout for one socket read (default **60**) |
 | `--response-timeout` | Most one reply may take in all, however slowly it arrives (default **300**) |
 | `--start`, `--start-date` / `--end`, `--end-date` | Inclusive date window |
-| `--overview-chunk N` | OVER/XOVER chunk size (default **10000**) |
+| `--overview-chunk N` | OVER/XOVER chunk size (default **10000**); halved while the server refuses a range as too wide |
 | `--no-dedup` | Disable Message-ID dedup |
 | `--plugin SPEC` | Plugin (`name` or `name:arg:key=value`) |
 | `-C`, `--connections N` | Parallel NNTP connections (default **8**) |
@@ -210,12 +211,14 @@ See `usenet-archiver -c COMMAND --help` for per-command details.
 ### Exit codes and completed jobs
 
 A job is written to `completed_newsgroups.log` only when every article the overview listed was
-fetched, answered 423/430 (no such article), or was too big: an article over 1 MiB, with a line
+fetched, answered 423/430 (no such article) twice, the second time on a new connection, or was
+too big: an article over 1 MiB, with a line
 over 1 MiB, or whose body as stored in the mbox (quotes included) reaches 1 MiB, is read but not
 written, and counted as `too-big`. mbox2nntp, which imports these mboxes, has the same limits; a
 longer line would stop its parser for the rest of the file. Any other answer (480 authentication
 required, 502 access denied, 503, a timeout, a cut connection) counts as an error, and a failed
-OVER/XOVER fails the job; it is then not recorded, so a later run fetches what is missing. So does
+OVER/XOVER fails the job (a range the server refuses as too wide, with 503 or with 501 while
+OVER works for one article, is asked again in halves first); it is then not recorded, so a later run fetches what is missing. So does
 an overview that lists no article at all while `STAT` finds one of the numbers `GROUP` reported
 (a broken overview database).
 
@@ -420,6 +423,14 @@ LICENSE                  # BSD 2-Clause
 
 ### Unreleased
 
+- **423 for an article the overview listed** is asked for once more, on a new connection, after
+  the fetch: a frontend of a server farm that lags behind the others answers 423 for new articles,
+  and the job was recorded as complete without them.
+- **An overview range the server refuses as too wide** is asked again in halves, down to one
+  number, and the smaller size is kept for the rest of the scan: a 503 used to fail the job (the
+  user had to lower `--overview-chunk`), and a 501 was taken for "no OVER", so the group was listed
+  with XHDR DATE, without Message-IDs, and every later run fetched every article again. A 501 is
+  taken for a too-wide range only when the same command answers for a single number (asked once).
 - **A truncated overview lost articles:** a server that answers an OVER/XOVER range wider than it
   allows with only its first part, without an error, left out the rest of every chunk (with the
   default `--overview-chunk 10000` and a server that lists 1000 at a time, nine in ten articles),
