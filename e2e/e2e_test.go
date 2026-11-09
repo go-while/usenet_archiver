@@ -547,6 +547,12 @@ func TestFaultNoPartialArticle(t *testing.T) {
 // as numbers 1..len(arts) with their headers exactly as given: the Store adds
 // a Message-ID to an article that has none.
 func rawHandler(arts []fakeserver.Article) func(*fakeserver.Conn) {
+	return rawHandlerWith(arts, nil)
+}
+
+// rawHandlerWith is rawHandler where absent(n), when given, decides that
+// ARTICLE n gets 423 this time.
+func rawHandlerWith(arts []fakeserver.Article, absent func(n int) bool) func(*fakeserver.Conn) {
 	return func(c *fakeserver.Conn) {
 		for {
 			line, err := c.ReadLine()
@@ -573,7 +579,7 @@ func rawHandler(arts []fakeserver.Article) func(*fakeserver.Conn) {
 			case "ARTICLE":
 				var n int
 				fmt.Sscan(f[len(f)-1], &n)
-				if n < 1 || n > len(arts) {
+				if n < 1 || n > len(arts) || (absent != nil && absent(n)) {
 					c.WriteLines("423 no article with that number")
 					continue
 				}

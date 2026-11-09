@@ -273,7 +273,7 @@ func TestConnectionPeak(t *testing.T) {
 // numbers with an article only every 250,000th number. The CLI must list it
 // in overview chunks, not number by number, ask ARTICLE only for the
 // articles there are, and get each once. An --overview-chunk wider than the
-// server takes (503) fails the job.
+// server takes (503) is halved until the server takes it.
 func TestHugeSparseGroup(t *testing.T) {
 	const high = 10_000_000
 	byNum := map[int64]fakeserver.Article{}
@@ -310,12 +310,13 @@ func TestHugeSparseGroup(t *testing.T) {
 	})
 
 	t.Run("chunk over the server's limit", func(t *testing.T) {
+		// the server answers 503 to the wide range: the CLI halves it
 		t.Parallel()
 		srv := server(t)
 		r := pullWithin(t, 120*time.Second, srv.Addr(), "", "--overview-chunk", "200000")
-		expectFailed(t, r)
-		if got, _ := readMbox(t, r.mbox); len(got) != 0 {
-			t.Errorf("%d articles written although the overview failed", len(got))
+		expectComplete(t, r, want)
+		if n := srv.Count("OVER") + srv.Count("XOVER"); n > 200 {
+			t.Errorf("%d OVER/XOVER for 10,000,000 numbers", n)
 		}
 	})
 }
@@ -323,8 +324,8 @@ func TestHugeSparseGroup(t *testing.T) {
 // TestTruncatedOverview: a provider that answers an OVER range wider than
 // it allows with only the first part of it (StoreOptions.MaxOverRange
 // without OverRangeTooLarge). The rest of the range must still be listed
-// and fetched; a provider that refuses the wide range instead (501) is
-// listed some other way.
+// and fetched; a provider that refuses the wide range instead (501 or 503)
+// is asked for smaller ranges.
 func TestTruncatedOverview(t *testing.T) {
 	arts := numbered(1000, "trunc")
 	t.Run("first 100 of each range", func(t *testing.T) {
@@ -335,12 +336,20 @@ func TestTruncatedOverview(t *testing.T) {
 			t.Errorf("%d OVER/XOVER for 1000 articles 100 at a time", n)
 		}
 	})
-	t.Run("501 for a wide range", func(t *testing.T) {
-		t.Parallel()
-		srv, _ := storeServer(t, arts, fakeserver.StoreOptions{MaxOverRange: 100, OverRangeTooLarge: []string{"501 range too large"}},
-			fakeserver.Faults{}, fakeserver.Options{})
-		expectComplete(t, pull(t, srv.Addr(), ""), arts)
-	})
+	for _, reply := range []string{"501 range too large", "503 range too large"} {
+		reply := reply
+		t.Run(reply[:3]+" for a wide range", func(t *testing.T) {
+			// the range is halved until the server takes it, and the group
+			// is still listed by OVER (with Message-IDs), not by XHDR
+			t.Parallel()
+			srv, _ := storeServer(t, arts, fakeserver.StoreOptions{MaxOverRange: 100, OverRangeTooLarge: []string{reply}},
+				fakeserver.Faults{}, fakeserver.Options{})
+			expectComplete(t, pull(t, srv.Addr(), ""), arts)
+			if n := srv.Count("XHDR") + srv.Count("HDR"); n != 0 {
+				t.Errorf("%d XHDR/HDR: fell back instead of asking a smaller range", n)
+			}
+		})
+	}
 }
 
 // TestNoCompress: the CLI does not use COMPRESS DEFLATE (RFC 8054). Offered

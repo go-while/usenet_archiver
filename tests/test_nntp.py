@@ -82,6 +82,11 @@ class FakeNNTPServer:
                 return b""
             buf.extend(chunk)
 
+    def hook(self, conn, upper: str) -> bool:
+        """For subclasses: answer the command line (upper-cased) and return
+        True, or return False for the normal answer."""
+        return False
+
     def _serve(self):
         while not self._stop.is_set():
             try:
@@ -130,6 +135,8 @@ class FakeNNTPServer:
                 if stall[1] is not None:
                     stall[1] -= 1
                 time.sleep(stall[0])
+            if self.hook(conn, upper):
+                continue
             if upper.startswith("CAPABILITIES"):
                 self._send(conn, b"101 Capability list:\r\nVERSION 2\r\nREADER\r\nOVER\r\n.\r\n")
             elif upper.startswith("MODE READER"):
