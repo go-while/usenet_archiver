@@ -330,8 +330,10 @@ func TestTruncatedOverview(t *testing.T) {
 	t.Run("first 100 of each range", func(t *testing.T) {
 		t.Parallel()
 		srv, _ := storeServer(t, arts, fakeserver.StoreOptions{MaxOverRange: 100}, fakeserver.Faults{}, fakeserver.Options{})
-		check := func(t T) { expectComplete(t, pull(t, srv.Addr(), ""), arts) }
-		knownBug(t, "tk-1", check)
+		expectComplete(t, pull(t, srv.Addr(), ""), arts)
+		if n := srv.Count("OVER") + srv.Count("XOVER"); n < 10 {
+			t.Errorf("%d OVER/XOVER for 1000 articles 100 at a time", n)
+		}
 	})
 	t.Run("501 for a wide range", func(t *testing.T) {
 		t.Parallel()
