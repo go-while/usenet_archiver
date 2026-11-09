@@ -992,11 +992,12 @@ func TestEmptyOverview(t *testing.T) {
 		}
 	})
 
-	// neither OVER nor XOVER, and no XHDR either: the group cannot be
-	// listed, which is a failure, not an empty group
+	// neither OVER nor XOVER, and no HDR/XHDR either: the group cannot be
+	// listed, which is a failure, not an empty group (the Store serves
+	// HDR/XHDR since nntp-testkit v0.8.0)
 	t.Run("no OVER, no XOVER", func(t *testing.T) {
 		t.Parallel()
-		srv, _ := storeServer(t, arts, fakeserver.StoreOptions{NoOver: true, NoXover: true}, fakeserver.Faults{}, fakeserver.Options{})
+		srv, _ := storeServer(t, arts, fakeserver.StoreOptions{NoOver: true, NoXover: true, NoHdr: true, NoXhdr: true}, fakeserver.Faults{}, fakeserver.Options{})
 		r := pull(t, srv.Addr(), "")
 		if r.exit == 0 || r.completed {
 			t.Errorf("exit %d completed %v\n%s", r.exit, r.completed, r.output)
