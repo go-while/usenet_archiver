@@ -29,6 +29,10 @@ import (
 	"github.com/go-while/nntp-testkit/fakeserver"
 )
 
+// maxLine is the longest client line both listeners take: above the 512 KiB line the
+// round injects and go-lib-mbox2nntp's 1 MiB limit, still a bound.
+const maxLine = 2 << 20
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:1119", "reader address (POST lists at once)")
 	feed := flag.String("feed", "", "feed address for IHAVE and POST (empty: none)")
@@ -45,8 +49,10 @@ func main() {
 
 	st := fakeserver.NewStore()
 	st.AddGroup(*group, "")
+	// MaxLine: since nntp-testkit v0.14.0 a client line over 64 KiB closes the connection by
+	// default, which would drop the injected 512 KiB-line article (e2e_test.go tricky).
 	rd, err := fakeserver.Start(fakeserver.Options{Addr: *addr, Store: st, Deadline: time.Hour,
-		StoreOpts: fakeserver.StoreOptions{User: *user, Pass: *pass}})
+		MaxLine: maxLine, StoreOpts: fakeserver.StoreOptions{User: *user, Pass: *pass}})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -56,7 +62,7 @@ func main() {
 	if *feed != "" {
 		f := &feeder{st: st, group: *group, delay: *delay, rejectCR: *rejectCR, reject8: *reject8,
 			host: *host, mangle: *mangle, strip: *strip, seen: map[string]bool{}}
-		fd, err = fakeserver.Start(fakeserver.Options{Addr: *feed, Deadline: time.Hour,
+		fd, err = fakeserver.Start(fakeserver.Options{Addr: *feed, Deadline: time.Hour, MaxLine: maxLine,
 			Greeting: "200 realserver-fake feed ready", Handler: fakeserver.LineHandler(f.line)})
 		if err != nil {
 			log.Fatal(err)
