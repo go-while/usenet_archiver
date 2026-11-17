@@ -49,7 +49,7 @@ func main() {
 
 	st := fakeserver.NewStore()
 	st.AddGroup(*group, "")
-	// MaxLine: since nntp-testkit v0.14.0 a client line over 64 KiB closes the connection by
+	// MaxLine: since nntp-testkit v0.14.1 a client line over 64 KiB closes the connection by
 	// default, which would drop the injected 512 KiB-line article (e2e_test.go tricky).
 	rd, err := fakeserver.Start(fakeserver.Options{Addr: *addr, Store: st, Deadline: time.Hour,
 		MaxLine: maxLine, StoreOpts: fakeserver.StoreOptions{User: *user, Pass: *pass}})
